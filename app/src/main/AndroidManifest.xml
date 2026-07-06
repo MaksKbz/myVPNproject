@@ -2,10 +2,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Android 14+: обязательно для foreground service типа specialUse -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    
-    <!-- Разрешение для сканирования ВСЕХ установленных приложений в Android 11 (API 30) и выше -->
+    <!-- Android 13+: показ уведомления о работающем VPN -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Android 11+: сканирование установленных приложений для split tunneling -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
     <application
@@ -26,6 +29,12 @@
             </intent-filter>
         </activity>
 
+        <!--
+            BypassVpnService — локальный TUN VPN без root.
+            BIND_VPN_SERVICE требуется системой для всех VpnService.
+            foregroundServiceType="specialUse" + property обязательны для Android 14+
+            (без этого система убивает сервис).
+        -->
         <service
             android:name=".vpn.BypassVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
@@ -36,7 +45,7 @@
             </intent-filter>
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="VPN DPI bypass service" />
+                android:value="DPI bypass local VPN — трафик не покидает устройство" />
         </service>
 
     </application>

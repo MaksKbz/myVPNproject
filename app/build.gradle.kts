@@ -11,10 +11,28 @@ android {
         applicationId = "com.makskbz.myvpnproject"
         minSdk = 24
         targetSdk = 34
-        versionCode = 8 // Повышено, чтобы гарантировать обновление
-        versionName = "1.07" // Повышено до версии 1.07 с жестким занижением MSS/Splitting
+        versionCode = 10
+        versionName = "3.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        vectorDrawables { useSupportLibrary = true }
+
+        ndk {
+            //  Целевые ABI: современные ARM64 + старые ARMv7 + x86_64 для эмулятора
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags("")
+                arguments("-DANDROID_STL=c++_static")
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/jni/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     buildTypes {
@@ -57,6 +75,14 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.appcompat:appcompat:1.7.0")
+    // Gson для сериализации конфигурации
+    implementation("com.google.code.gson:gson:2.11.0")
+    // Preferences для SharedPreferences
+    implementation("androidx.preference:preference-ktx:1.2.1")
+    // Coroutines для асинхронной работы
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // WorkManager для фонового watchdog
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
