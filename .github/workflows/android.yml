@@ -42,7 +42,7 @@ jobs:
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: myVPNproject-debug-v1.04
+        name: myVPNproject-debug-v1.05
         path: app/build/outputs/apk/debug/app-debug.apk
         if-no-files-found: error
         retention-days: 30
@@ -50,9 +50,9 @@ jobs:
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: "v1.04"
-        name: "Release v1.04"
-        body: "Debug APK — DPI bypass VPN for Android (v1.04) with Custom App Split Tunneling"
+        tag_name: "v1.05"
+        name: "Release v1.05"
+        body: "Debug APK — DPI bypass VPN for Android (v1.05) with QUERY_ALL_PACKAGES support"
         files: app/build/outputs/apk/debug/app-debug.apk
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

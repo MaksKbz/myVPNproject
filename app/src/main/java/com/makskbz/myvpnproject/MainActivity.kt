@@ -5,9 +5,9 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -32,7 +32,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        // Получаем список установленных пользовательских приложений
+        // Получаем полный список установленных приложений с поддержкой QUERY_ALL_PACKAGES
         val installedApps = getInstalledAppsList()
 
         setContent {
@@ -55,14 +55,32 @@ class MainActivity : ComponentActivity() {
     private fun getInstalledAppsList(): List<AppItem> {
         val apps = mutableListOf<AppItem>()
         val pm = packageManager
-        val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-        for (app in packages) {
-            // Отфильтровываем только пользовательские (несистемные) приложения для удобства выбора
-            if ((app.flags and ApplicationInfo.FLAG_SYSTEM) == 0 || app.packageName == "com.android.chrome" || app.packageName == "com.google.android.youtube") {
+        
+        try {
+            // Флаг GET_META_DATA в связке с QUERY_ALL_PACKAGES позволяет получить полный список приложений в Android 11+
+            val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+            Log.d("MainActivity", "Found ${packages.size} packages installed")
+            
+            for (app in packages) {
                 val name = app.loadLabel(pm).toString()
-                apps.add(AppItem(name, app.packageName))
+                val packageName = app.packageName
+                
+                // Пропускаем системные процессы Android, оставляя браузеры, YouTube и пользовательские приложения
+                val isSystemApp = (app.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                val isEssentialApp = packageName == "com.android.chrome" || 
+                                     packageName == "com.google.android.youtube" || 
+                                     packageName.contains("browser") || 
+                                     packageName.contains("discord") || 
+                                     packageName.contains("telegram")
+
+                if (!isSystemApp || isEssentialApp) {
+                    apps.add(AppItem(name, packageName))
+                }
             }
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error retrieving installed applications", e)
         }
+
         return apps.sortedBy { it.name }
     }
 
@@ -119,7 +137,7 @@ fun VpnControlScreen(
             color = MaterialTheme.colorScheme.primary
         )
         Text(
-            text = "DPI Bypass VPN Client (v1.04)",
+            text = "DPI Bypass VPN Client (v1.05)",
             fontSize = 13.sp,
             color = Color.Gray,
             modifier = Modifier.padding(top = 2.dp, bottom = 16.dp)
@@ -178,7 +196,7 @@ fun VpnControlScreen(
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
-                            text = "ИНСТРУКЦИЯ ПО ТЕСТИРОВАНИЮ",
+                            text = "ИНСТРУКЦИЯ ПО ТЕСТИРОВАНИЮ v1.05",
                             fontWeight = FontWeight.Bold,
                             fontSize = 15.sp,
                             color = MaterialTheme.colorScheme.primary
@@ -186,8 +204,8 @@ fun VpnControlScreen(
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
                             text = "Для проверки обхода блокировок DPI (например, YouTube или Discord):\n" +
-                                    "1. Перейдите на вкладку 'Приложения'.\n" +
-                                    "2. Отметьте галочками те приложения, в которых нужно обойти ограничения (например, Google Chrome или YouTube).\n" +
+                                    "1. Перейдите на вкладку 'Приложения'. Теперь там отображается полный список установленных на вашем смартфоне программ.\n" +
+                                    "2. Отметьте галочками те приложения, в которых нужно обойти ограничения (например, Google Chrome, Discord или YouTube).\n" +
                                     "3. Вернитесь на эту вкладку и нажмите зеленую кнопку 'ЗАПУСТИТЬ VPN'.\n" +
                                     "4. Откройте выбранное приложение — весь его трафик будет десинхронизироваться и фрагментироваться локально на вашем процессоре, обходя DPI провайдера.\n" +
                                     "5. Все остальные (не отмеченные) приложения будут ходить в интернет напрямую без VPN-прослойки, сохраняя максимальную скорость.",

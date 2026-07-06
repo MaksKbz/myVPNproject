@@ -11,8 +11,8 @@ android {
         applicationId = "com.makskbz.myvpnproject"
         minSdk = 24
         targetSdk = 34
-        versionCode = 5
-        versionName = "1.04" // Повышено до стабильной версии 1.04 с раздельной фильтрацией
+        versionCode = 6 // Повышено, чтобы Android распознавал обновление
+        versionName = "1.05" // Повышено до версии 1.05 с полнымQUERY сканированием
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
     }
