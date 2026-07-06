@@ -20,17 +20,15 @@ jobs:
       with:
         java-version: '17'
         distribution: 'temurin'
-        cache: gradle
 
-    - name: Validate Gradle Wrapper
-      uses: gradle/wrapper-validation-action@v1
+    - name: Setup Gradle
+      uses: gradle/gradle-build-action@v2
 
     - name: Build with Gradle
       run: |
-        # Generate wrapper if missing
-        if [ ! -f "gradlew" ]; then
-          gradle wrapper
-        fi
+        # Мы используем встроенную утилиту gradle в Ubuntu-раннере, чтобы не зависеть от заглушек gradle-wrapper.
+        # Инициализируем чистый рабочий gradle wrapper и запускаем сборку
+        gradle wrapper
         chmod +x gradlew
         ./gradlew assembleDebug --stacktrace
 
