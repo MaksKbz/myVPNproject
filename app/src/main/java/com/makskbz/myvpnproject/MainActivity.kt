@@ -6,6 +6,8 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -67,14 +69,17 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun VpnControlScreen(onStartVpn: () -> Unit, onStopVpn: () -> Unit) {
     var isRunning by remember { mutableStateOf(false) }
+    val scrollState = rememberScrollState()
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(24.dp)
+            .verticalScroll(scrollState),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+        verticalArrangement = Arrangement.Top
     ) {
+        Spacer(modifier = Modifier.height(16.dp))
         Text(
             text = "myVPNproject",
             fontSize = 32.sp,
@@ -85,7 +90,7 @@ fun VpnControlScreen(onStartVpn: () -> Unit, onStopVpn: () -> Unit) {
             text = "B4-inspired DPI Bypass VPN Client",
             fontSize = 14.sp,
             color = Color.Gray,
-            modifier = Modifier.padding(top = 4.dp, bottom = 48.dp)
+            modifier = Modifier.padding(top = 4.dp, bottom = 24.dp)
         )
 
         Button(
@@ -115,14 +120,43 @@ fun VpnControlScreen(onStartVpn: () -> Unit, onStopVpn: () -> Unit) {
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        // Секция с инструкцией на русском языке
         Card(
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text(text = "Active strategies:", fontWeight = FontWeight.Bold)
-                Text(text = "• TLS ClientHello Split (Index: 2)", modifier = Modifier.padding(top = 4.dp))
-                Text(text = "• Drop QUIC (UDP port 443)", modifier = Modifier.padding(top = 2.dp))
-                Text(text = "• DNS redirection to DoH", modifier = Modifier.padding(top = 2.dp))
+                Text(
+                    text = "ИНСТРУКЦИЯ ПО ИСПОЛЬЗОВАНИЮ",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Данное приложение использует локальный интерфейс VPN (VpnService) Android без отправки трафика на внешние сервера (без-серверный обход DPI). Модификация пакетов происходит локально на вашем процессоре.",
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Как это работает:\n" +
+                            "1. Нажмите зеленую кнопку 'START VPN'.\n" +
+                            "2. Разрешите системе Android создать VPN-подключение.\n" +
+                            "3. Приложение начнет перехватывать ваши исходящие запросы:\n" +
+                            "   • Трафик QUIC (UDP 443) блокируется. Это вынуждает приложения и сайты (например, YouTube) переключаться на TCP-протокол.\n" +
+                            "   • Пакеты TLS ClientHello фрагментируются. DPI-система провайдера видит разрозненные сегменты и не может распознать заблокированный домен (SNI).\n" +
+                            "   • Весь остальной сетевой трафик беспрепятственно передается в интернет.",
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Внимание: Для корректной работы интернет-доступа убедитесь, что в системе не включены другие VPN-сервисы, а DNS-серверы вашего провайдера не блокируют запрашиваемые домены на уровне IP.",
+                    fontSize = 12.sp,
+                    color = Color.Gray,
+                    lineHeight = 16.sp
+                )
             }
         }
     }

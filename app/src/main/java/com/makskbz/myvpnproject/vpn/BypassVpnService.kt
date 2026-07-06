@@ -56,11 +56,13 @@ class BypassVpnService : VpnService(), Runnable {
 
     override fun run() {
         try {
-            // Configure local VPN interface
+            // Configure local VPN interface.
+            // Using standard cloudflare/google DNS for reliable resolution
             val builder = Builder()
                 .setSession("myVPNproject")
                 .addAddress("10.0.0.2", 32)
                 .addRoute("0.0.0.0", 0)
+                .addDnsServer("1.1.1.1")
                 .addDnsServer("8.8.8.8")
                 .setMtu(1500)
 
@@ -81,15 +83,17 @@ class BypassVpnService : VpnService(), Runnable {
                     buffer.limit(length)
                     buffer.rewind()
 
-                    // Here we pass the packets to our DPI Bypass Packet Processor
+                    // Process and modify packets
                     val processedLength = PacketProcessor.processPacket(buffer, length)
 
                     if (processedLength > 0) {
+                        // Write the allowed/modified packet back to the interface
                         output.write(buffer.array(), 0, processedLength)
                     }
                     buffer.clear()
                 }
-                Thread.sleep(1)
+                // Yield thread to prevent high CPU load on Android device
+                Thread.sleep(2)
             }
         } catch (e: InterruptedException) {
             Log.i(TAG, "VPN loop interrupted.")
