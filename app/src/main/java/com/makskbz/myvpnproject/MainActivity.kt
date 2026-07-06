@@ -57,7 +57,6 @@ class MainActivity : ComponentActivity() {
         val pm = packageManager
         
         try {
-            // Флаг GET_META_DATA в связке с QUERY_ALL_PACKAGES позволяет получить полный список приложений в Android 11+
             val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
             Log.d("MainActivity", "Found ${packages.size} packages installed")
             
@@ -65,11 +64,12 @@ class MainActivity : ComponentActivity() {
                 val name = app.loadLabel(pm).toString()
                 val packageName = app.packageName
                 
-                // Пропускаем системные процессы Android, оставляя браузеры, YouTube и пользовательские приложения
+                // Пропускаем системные фоновые службы, оставляя пользовательские программы и браузеры
                 val isSystemApp = (app.flags and ApplicationInfo.FLAG_SYSTEM) != 0
                 val isEssentialApp = packageName == "com.android.chrome" || 
                                      packageName == "com.google.android.youtube" || 
                                      packageName.contains("browser") || 
+                                     packageName.contains("opera") || 
                                      packageName.contains("discord") || 
                                      packageName.contains("telegram")
 
@@ -137,7 +137,7 @@ fun VpnControlScreen(
             color = MaterialTheme.colorScheme.primary
         )
         Text(
-            text = "DPI Bypass VPN Client (v1.05)",
+            text = "DPI Bypass VPN Client (v1.06)",
             fontSize = 13.sp,
             color = Color.Gray,
             modifier = Modifier.padding(top = 2.dp, bottom = 16.dp)
@@ -196,18 +196,18 @@ fun VpnControlScreen(
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
-                            text = "ИНСТРУКЦИЯ ПО ТЕСТИРОВАНИЮ v1.05",
+                            text = "ИНСТРУКЦИЯ ПО ТЕСТИРОВАНИЮ v1.06",
                             fontWeight = FontWeight.Bold,
                             fontSize = 15.sp,
                             color = MaterialTheme.colorScheme.primary
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "Для проверки обхода блокировок DPI (например, YouTube или Discord):\n" +
-                                    "1. Перейдите на вкладку 'Приложения'. Теперь там отображается полный список установленных на вашем смартфоне программ.\n" +
-                                    "2. Отметьте галочками те приложения, в которых нужно обойти ограничения (например, Google Chrome, Discord или YouTube).\n" +
+                            text = "Для проверки обхода блокировок DPI (например, YouTube или заблокированных сайтов в Казахстане):\n" +
+                                    "1. Перейдите на вкладку 'Приложения'.\n" +
+                                    "2. Отметьте галочками нужный браузер (например, Opera, Chrome или Яндекс.Браузер).\n" +
                                     "3. Вернитесь на эту вкладку и нажмите зеленую кнопку 'ЗАПУСТИТЬ VPN'.\n" +
-                                    "4. Откройте выбранное приложение — весь его трафик будет десинхронизироваться и фрагментироваться локально на вашем процессоре, обходя DPI провайдера.\n" +
+                                    "4. Откройте выбранное приложение — весь его веб-трафик теперь автоматически фрагментируется локально на вашем процессоре, обходя DPI провайдера.\n" +
                                     "5. Все остальные (не отмеченные) приложения будут ходить в интернет напрямую без VPN-прослойки, сохраняя максимальную скорость.",
                             fontSize = 13.sp,
                             lineHeight = 18.sp

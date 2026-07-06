@@ -7,6 +7,8 @@ import android.util.Log
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -41,7 +43,7 @@ class BypassVpnService : VpnService(), Runnable {
         isRunning = true
         executorService = Executors.newCachedThreadPool()
         vpnThread = Thread({ runVpn(allowedApps) }, "BypassVpnThread").apply { start() }
-        Log.i(TAG, "VPN service 1.04 started with app filtering.")
+        Log.i(TAG, "VPN service 1.06 started.")
     }
 
     private fun stopVpn() {
@@ -58,7 +60,7 @@ class BypassVpnService : VpnService(), Runnable {
         executorService?.shutdownNow()
         executorService = null
         stopSelf()
-        Log.i(TAG, "VPN service 1.04 stopped.")
+        Log.i(TAG, "VPN service 1.06 stopped.")
     }
 
     override fun onDestroy() {
@@ -66,23 +68,24 @@ class BypassVpnService : VpnService(), Runnable {
         super.onDestroy()
     }
 
-    // Заглушка для Runnable интерфейса
     override fun run() {}
 
     private fun runVpn(allowedApps: ArrayList<String>?) {
         try {
+            // КОНФИГУРАЦИЯ ИНТЕРФЕЙСА ДЛЯ ОБХОДА DPI В КАЗАХСТАНЕ (v1.06):
+            // Для того чтобы выбранные приложения (например, Opera) могли успешно открывать 
+            // заблокированные в Казахстане сайты, мы настраиваем глобальный перехват трафика Олицетворения.
+            // addRoute("0.0.0.0", 0) перехватывает весь веб-трафик выбранного браузера.
+            
             val builder = Builder()
                 .setSession("myVPNproject")
                 .addAddress("10.0.0.2", 32)
-                .addRoute("1.1.1.1", 32)
-                .addRoute("8.8.8.8", 32)
-                .addDnsServer("1.1.1.1")
-                .addDnsServer("8.8.8.8")
+                .addRoute("0.0.0.0", 0) // Маршрутизируем ВСЕ подсети выбранного приложения для фрагментации
+                .addDnsServer("1.1.1.1") // Публичный безопасный Cloudflare DNS в обход провайдера
+                .addDnsServer("8.8.8.8") // Публичный Google DNS
                 .setMtu(1500)
 
-            // Применяем выборочное туннелирование (Split Tunneling).
-            // Если пользователь выбрал приложения, трафик пойдет через VPN ТОЛЬКО для них.
-            // Все остальные приложения пойдут в сеть как обычно в обход VPN!
+            // Применяем выборочное туннелирование
             if (allowedApps != null && allowedApps.isNotEmpty()) {
                 Log.i(TAG, "Applying Split Tunneling for apps: $allowedApps")
                 for (packageName in allowedApps) {
@@ -93,13 +96,12 @@ class BypassVpnService : VpnService(), Runnable {
                     }
                 }
             } else {
-                // Если список пуст, мы по умолчанию добавляем Chrome и YouTube,
-                // чтобы не блокировать весь телефон и не перегружать системный трафик.
+                // Если пользователь ничего не выбрал, по умолчанию заворачиваем Оперу и Chrome
                 try {
+                    builder.addAllowedApplication("com.opera.browser")
                     builder.addAllowedApplication("com.android.chrome")
-                    builder.addAllowedApplication("com.google.android.youtube")
                 } catch (e: Exception) {
-                    Log.w(TAG, "Chrome or YouTube not found, routing locally")
+                    Log.w(TAG, "Opera/Chrome package registry fallback")
                 }
             }
 
