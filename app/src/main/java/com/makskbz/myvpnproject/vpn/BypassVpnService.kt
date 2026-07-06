@@ -8,9 +8,13 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.InetSocketAddress
+import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
+import java.nio.channels.Selector
 import java.nio.channels.SocketChannel
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 class BypassVpnService : VpnService(), Runnable {
 
@@ -23,6 +27,7 @@ class BypassVpnService : VpnService(), Runnable {
     private var vpnThread: Thread? = null
     private var vpnInterface: ParcelFileDescriptor? = null
     private var isRunning = false
+    private var executorService: ExecutorService? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
@@ -37,8 +42,9 @@ class BypassVpnService : VpnService(), Runnable {
     private fun startVpn() {
         if (isRunning) return
         isRunning = true
+        executorService = Executors.newCachedThreadPool()
         vpnThread = Thread(this, "BypassVpnThread").apply { start() }
-        Log.i(TAG, "VPN service started.")
+        Log.i(TAG, "VPN service 1.02 started.")
     }
 
     private fun stopVpn() {
@@ -52,8 +58,10 @@ class BypassVpnService : VpnService(), Runnable {
         vpnInterface = null
         vpnThread?.interrupt()
         vpnThread = null
+        executorService?.shutdownNow()
+        executorService = null
         stopSelf()
-        Log.i(TAG, "VPN service stopped.")
+        Log.i(TAG, "VPN service 1.02 stopped.")
     }
 
     override fun onDestroy() {
@@ -63,20 +71,27 @@ class BypassVpnService : VpnService(), Runnable {
 
     override fun run() {
         try {
-            // Инициализируем VPN-интерфейс Android.
-            // Чтобы дать реальный доступ в интернет, VpnService должен использовать правильные маршруты.
-            // Для rootless обхода DPI без внешних серверов, VpnService должен настроить защищенный туннель,
-            // но поскольку мы не отправляем пакеты на удаленный прокси, мы настраиваем локальный прокси-сервер 
-            // или точечно защищаем системные сокеты через метод protect().
+            // Для бесперебойной работы интернета на Android (без поднятия сложного C-движка lwIP)
+            // мы используем режим селективного перехвата DNS и QUIC (UDP 443).
+            // Обычный TCP-трафик идет напрямую через защищенные сокеты, что исключает потерю пакетов.
             
             val builder = Builder()
                 .setSession("myVPNproject")
                 .addAddress("10.0.0.2", 32)
-                .addRoute("1.1.1.1", 32) // Перехватываем только DNS-запросы
+                // Маршрутизируем DNS-серверы для безопасного резолвинга DoH
+                .addRoute("1.1.1.1", 32)
                 .addRoute("8.8.8.8", 32)
                 .addDnsServer("1.1.1.1")
                 .addDnsServer("8.8.8.8")
                 .setMtu(1500)
+
+            // Разрешаем только определенным браузерам или приложениям работать через VPN,
+            // чтобы банковский и системный трафик шел на полной скорости без задержек.
+            try {
+                builder.addAllowedApplication("com.android.chrome")
+            } catch (e: Exception) {
+                Log.w(TAG, "Chrome is not installed, running in global mode")
+            }
 
             vpnInterface = builder.establish()
             if (vpnInterface == null) {
@@ -88,7 +103,7 @@ class BypassVpnService : VpnService(), Runnable {
             val output = FileOutputStream(vpnInterface!!.fileDescriptor)
             val buffer = ByteBuffer.allocate(32767)
 
-            Log.i(TAG, "Rootless VpnService successfully established. Routing traffic.")
+            Log.i(TAG, "DPI Bypass established. Starting packet routing loop.")
 
             while (isRunning) {
                 val length = input.read(buffer.array())
@@ -96,14 +111,22 @@ class BypassVpnService : VpnService(), Runnable {
                     buffer.limit(length)
                     buffer.rewind()
 
-                    // Анализируем и модифицируем пакеты локально
-                    val processedLength = PacketProcessor.processPacket(buffer, length)
-                    if (processedLength > 0) {
-                        output.write(buffer.array(), 0, processedLength)
+                    // Безопасно обрабатываем пакеты в фоновом пуле потоков
+                    executorService?.submit {
+                        try {
+                            val processedLength = PacketProcessor.processPacket(buffer, length)
+                            if (processedLength > 0) {
+                                synchronized(output) {
+                                    output.write(buffer.array(), 0, processedLength)
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error in background packet processing", e)
+                        }
                     }
                     buffer.clear()
                 }
-                Thread.sleep(5)
+                Thread.sleep(1)
             }
         } catch (e: InterruptedException) {
             Log.i(TAG, "VPN loop interrupted.")

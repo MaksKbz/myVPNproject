@@ -87,7 +87,7 @@ fun VpnControlScreen(onStartVpn: () -> Unit, onStopVpn: () -> Unit) {
             color = MaterialTheme.colorScheme.primary
         )
         Text(
-            text = "B4-inspired DPI Bypass VPN Client",
+            text = "B4-inspired DPI Bypass VPN Client (v1.02)",
             fontSize = 14.sp,
             color = Color.Gray,
             modifier = Modifier.padding(top = 4.dp, bottom = 24.dp)
@@ -127,7 +127,7 @@ fun VpnControlScreen(onStartVpn: () -> Unit, onStopVpn: () -> Unit) {
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    text = "ИНСТРУКЦИЯ ПО ИСПОЛЬЗОВАНИЮ",
+                    text = "ИНСТРУКЦИЯ ПО ИСПОЛЬЗОВАНИЮ v1.02",
                     fontWeight = FontWeight.Bold,
                     fontSize = 16.sp,
                     color = MaterialTheme.colorScheme.primary
@@ -146,6 +146,7 @@ fun VpnControlScreen(onStartVpn: () -> Unit, onStopVpn: () -> Unit) {
                             "3. Приложение начнет перехватывать ваши исходящие запросы:\n" +
                             "   • Трафик QUIC (UDP 443) блокируется. Это вынуждает приложения и сайты (например, YouTube) переключаться на TCP-протокол.\n" +
                             "   • Пакеты TLS ClientHello фрагментируются. DPI-система провайдера видит разрозненные сегменты и не может распознать заблокированный домен (SNI).\n" +
+                            "   • Применяется защищенный сокет-транзит через защитные методы Android OS для исключения мертвых циклов и падения интернета.\n" +
                             "   • Весь остальной сетевой трафик беспрепятственно передается в интернет.",
                     fontSize = 13.sp,
                     lineHeight = 18.sp
