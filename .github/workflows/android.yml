@@ -5,7 +5,7 @@ on:
     branches: [ "master" ]
   pull_request:
     branches: [ "master" ]
-  workflow_dispatch: # Позволяет запускать сборку вручную одной кнопкой
+  workflow_dispatch:
 
 jobs:
   build:
@@ -22,11 +22,16 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
+    - name: Validate Gradle Wrapper
+      uses: gradle/wrapper-validation-action@v1
+
     - name: Build with Gradle
       run: |
-        chmod +x gradlew || true
-        # Поскольку gradlew-враппер изначально не закомичен, сгенерируем или используем gradle
-        gradle wrapper
+        # Generate wrapper if missing
+        if [ ! -f "gradlew" ]; then
+          gradle wrapper
+        fi
+        chmod +x gradlew
         ./gradlew assembleDebug --stacktrace
 
     - name: Upload APK Artifact
