@@ -7,7 +7,10 @@ import android.util.Log
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import java.net.InetSocketAddress
 import java.nio.ByteBuffer
+import java.nio.channels.DatagramChannel
+import java.nio.channels.SocketChannel
 
 class BypassVpnService : VpnService(), Runnable {
 
@@ -41,7 +44,11 @@ class BypassVpnService : VpnService(), Runnable {
     private fun stopVpn() {
         if (!isRunning) return
         isRunning = false
-        vpnInterface?.close()
+        try {
+            vpnInterface?.close()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error closing VPN interface", e)
+        }
         vpnInterface = null
         vpnThread?.interrupt()
         vpnThread = null
@@ -56,12 +63,17 @@ class BypassVpnService : VpnService(), Runnable {
 
     override fun run() {
         try {
-            // Configure local VPN interface.
-            // Using standard cloudflare/google DNS for reliable resolution
+            // Инициализируем VPN-интерфейс Android.
+            // Чтобы дать реальный доступ в интернет, VpnService должен использовать правильные маршруты.
+            // Для rootless обхода DPI без внешних серверов, VpnService должен настроить защищенный туннель,
+            // но поскольку мы не отправляем пакеты на удаленный прокси, мы настраиваем локальный прокси-сервер 
+            // или точечно защищаем системные сокеты через метод protect().
+            
             val builder = Builder()
                 .setSession("myVPNproject")
                 .addAddress("10.0.0.2", 32)
-                .addRoute("0.0.0.0", 0)
+                .addRoute("1.1.1.1", 32) // Перехватываем только DNS-запросы
+                .addRoute("8.8.8.8", 32)
                 .addDnsServer("1.1.1.1")
                 .addDnsServer("8.8.8.8")
                 .setMtu(1500)
@@ -74,8 +86,9 @@ class BypassVpnService : VpnService(), Runnable {
 
             val input = FileInputStream(vpnInterface!!.fileDescriptor)
             val output = FileOutputStream(vpnInterface!!.fileDescriptor)
-
             val buffer = ByteBuffer.allocate(32767)
+
+            Log.i(TAG, "Rootless VpnService successfully established. Routing traffic.")
 
             while (isRunning) {
                 val length = input.read(buffer.array())
@@ -83,17 +96,14 @@ class BypassVpnService : VpnService(), Runnable {
                     buffer.limit(length)
                     buffer.rewind()
 
-                    // Process and modify packets
+                    // Анализируем и модифицируем пакеты локально
                     val processedLength = PacketProcessor.processPacket(buffer, length)
-
                     if (processedLength > 0) {
-                        // Write the allowed/modified packet back to the interface
                         output.write(buffer.array(), 0, processedLength)
                     }
                     buffer.clear()
                 }
-                // Yield thread to prevent high CPU load on Android device
-                Thread.sleep(2)
+                Thread.sleep(5)
             }
         } catch (e: InterruptedException) {
             Log.i(TAG, "VPN loop interrupted.")
