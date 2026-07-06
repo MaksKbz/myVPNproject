@@ -7,58 +7,59 @@ import android.util.Log
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
-import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class BypassVpnService : VpnService(), Runnable {
 
     companion object {
         const val TAG = "BypassVpnService"
         const val ACTION_START = "START"
-        const val ACTION_STOP = "STOP"
+        const val ACTION_STOP  = "STOP"
         const val EXTRA_ALLOWED_APPS = "ALLOWED_APPS"
+        // Корректный MTU для TUN: 1500 - 20 (IP) - 20 (TCP) = 1460,
+        // но с запасом на туннельный overhead берём 1400
+        private const val TUN_MTU = 1400
+        // Размер буфера чтения = MTU + небольшой запас
+        private const val READ_BUFFER_SIZE = TUN_MTU + 100
     }
 
     private var vpnThread: Thread? = null
     private var vpnInterface: ParcelFileDescriptor? = null
-    private var isRunning = false
+    // AtomicBoolean для корректного visibility между потоками
+    private val isRunning = AtomicBoolean(false)
     private var executorService: ExecutorService? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val action = intent?.action
-        if (action == ACTION_START) {
-            val allowedApps = intent.getStringArrayListExtra(EXTRA_ALLOWED_APPS)
-            startVpn(allowedApps)
-        } else if (action == ACTION_STOP) {
-            stopVpn()
+        when (intent?.action) {
+            ACTION_START -> {
+                val allowedApps = intent.getStringArrayListExtra(EXTRA_ALLOWED_APPS)
+                startVpn(allowedApps)
+            }
+            ACTION_STOP -> stopVpn()
         }
         return START_STICKY
     }
 
     private fun startVpn(allowedApps: ArrayList<String>?) {
-        if (isRunning) return
-        isRunning = true
-        executorService = Executors.newCachedThreadPool()
+        if (isRunning.getAndSet(true)) return
+        // Фиксированный пул: 2 потока достаточно для обработки пакетов без overhead
+        executorService = Executors.newFixedThreadPool(2)
         vpnThread = Thread({ runVpn(allowedApps) }, "BypassVpnThread").apply { start() }
-        Log.i(TAG, "VPN service 1.07 started.")
+        Log.i(TAG, "VPN service 2.0 started (MTU=$TUN_MTU)")
     }
 
     private fun stopVpn() {
-        if (!isRunning) return
-        isRunning = false
-        try {
-            vpnInterface?.close()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error closing VPN interface", e)
-        }
+        if (!isRunning.getAndSet(false)) return
+        try { vpnInterface?.close() } catch (e: Exception) { Log.e(TAG, "Error closing VPN interface", e) }
         vpnInterface = null
         vpnThread?.interrupt()
         vpnThread = null
         executorService?.shutdownNow()
         executorService = null
         stopSelf()
-        Log.i(TAG, "VPN service 1.07 stopped.")
+        Log.i(TAG, "VPN service 2.0 stopped")
     }
 
     override fun onDestroy() {
@@ -70,73 +71,62 @@ class BypassVpnService : VpnService(), Runnable {
 
     private fun runVpn(allowedApps: ArrayList<String>?) {
         try {
-            // КОНФИГУРАЦИЯ ИНТЕРФЕЙСА ДЛЯ ОБХОДА DPI (v1.07):
-            // Для того чтобы выбранные приложения (например, Opera) могли успешно открывать 
-            // заблокированные в Казахстане сайты, мы настраиваем глобальный перехват трафика Олицетворения.
-            // addRoute("0.0.0.0", 0) перехватывает весь веб-трафик выбранного браузера.
-            
             val builder = Builder()
-                .setSession("myVPNproject")
+                .setSession("myVPNproject v2.0")
                 .addAddress("10.0.0.2", 32)
-                .addRoute("0.0.0.0", 0) // Маршрутизируем ВСЕ подсети выбранного приложения для фрагментации
-                .addDnsServer("1.1.1.1") // Публичный безопасный Cloudflare DNS в обход провайдера
-                .addDnsServer("8.8.8.8") // Публичный Google DNS
-                .setMtu(1500)
+                .addRoute("0.0.0.0", 0)
+                .addDnsServer("1.1.1.1")
+                .addDnsServer("8.8.8.8")
+                .setMtu(TUN_MTU)  // исправлено: было 1500
 
-            // Применяем выборочное туннелирование
-            if (allowedApps != null && allowedApps.isNotEmpty()) {
-                Log.i(TAG, "Applying Split Tunneling for apps: $allowedApps")
-                for (packageName in allowedApps) {
-                    try {
-                        builder.addAllowedApplication(packageName)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Could not add allowed application: $packageName", e)
-                    }
+            if (!allowedApps.isNullOrEmpty()) {
+                Log.i(TAG, "Split tunneling for: $allowedApps")
+                for (pkg in allowedApps) {
+                    try { builder.addAllowedApplication(pkg) }
+                    catch (e: Exception) { Log.w(TAG, "Cannot add app: $pkg", e) }
                 }
             } else {
-                // Если пользователь ничего не выбрал, по умолчанию заворачиваем Оперу и Chrome
-                try {
-                    builder.addAllowedApplication("com.opera.browser")
-                    builder.addAllowedApplication("com.android.chrome")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Opera/Chrome package registry fallback")
+                // Дефолтные приложения
+                listOf("com.opera.browser", "com.android.chrome").forEach { pkg ->
+                    try { builder.addAllowedApplication(pkg) }
+                    catch (e: Exception) { Log.w(TAG, "Fallback: cannot add $pkg") }
                 }
             }
 
             vpnInterface = builder.establish()
             if (vpnInterface == null) {
-                Log.e(TAG, "Failed to establish VPN interface.")
+                Log.e(TAG, "Failed to establish VPN interface")
                 return
             }
 
-            val input = FileInputStream(vpnInterface!!.fileDescriptor)
+            val input  = FileInputStream(vpnInterface!!.fileDescriptor)
             val output = FileOutputStream(vpnInterface!!.fileDescriptor)
-            val buffer = ByteBuffer.allocate(32767)
 
-            while (isRunning) {
-                val length = input.read(buffer.array())
-                if (length > 0) {
-                    buffer.limit(length)
-                    buffer.rewind()
+            // ИСПРАВЛЕНО: используем блокирующее чтение без Thread.sleep()
+            // Каждый пакет копируется в собственный ByteArray — устраняет race condition
+            while (isRunning.get()) {
+                // Выделяем буфер на каждую итерацию чтобы избежать data race
+                val readBuf = ByteArray(READ_BUFFER_SIZE)
+                val length = input.read(readBuf)
+                if (length <= 0) continue
 
-                    executorService?.submit {
-                        try {
-                            val processedLength = PacketProcessor.processPacket(buffer, length)
-                            if (processedLength > 0) {
-                                synchronized(output) {
-                                    output.write(buffer.array(), 0, processedLength)
-                                }
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error in packet loop", e)
+                // Делаем независимую копию для передачи в поток
+                val packetCopy = readBuf.copyOf(length)
+
+                executorService?.submit {
+                    try {
+                        // output защищён synchronized — единственная точка записи в TUN
+                        synchronized(output) {
+                            PacketProcessor.processPacket(packetCopy, length, output)
                         }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Packet processing error", e)
                     }
-                    buffer.clear()
                 }
-                Thread.sleep(1)
             }
+
         } catch (e: InterruptedException) {
-            Log.i(TAG, "VPN thread interrupted.")
+            Log.i(TAG, "VPN thread interrupted")
         } catch (e: IOException) {
             Log.e(TAG, "VPN IO exception", e)
         } finally {
