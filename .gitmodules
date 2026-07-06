@@ -1,0 +1,9 @@
+[submodule "app/src/main/jni/ciadpi"]
+	path = app/src/main/jni/ciadpi
+	url = https://github.com/hufrea/byedpi.git
+	shallow = true
+
+[submodule "app/src/main/jni/tun2socks"]
+	path = app/src/main/jni/tun2socks
+	url = https://github.com/ambrop72/badvpn.git
+	shallow = true

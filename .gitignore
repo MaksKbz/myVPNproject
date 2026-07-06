@@ -19,3 +19,15 @@ local.properties
 *.apk
 *.ap_
 *.aab
+
+# NDK / CMake build artefacts
+.cxx/
+app/.cxx/
+
+# Submodule build artefacts (сами субмодули отслеживаются через .gitmodules)
+app/src/main/jni/ciadpi/build/
+app/src/main/jni/tun2socks/build/
+
+# Keystore (никогда не коммитить пароль от подписи)
+*.keystore
+*.jks
