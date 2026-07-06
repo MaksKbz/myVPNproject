@@ -1,10 +1,21 @@
+# Built outputs
 /build
 /app/build
-.gradle
-.idea
+
+# Gradle cache (but NOT wrapper!)
+.gradle/
+!gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
+
+# IDE
+.idea/
 *.iml
-local.properties
 .DS_Store
+
+# Local config (generated on each machine)
+local.properties
+
+# APK/AAB outputs
 *.apk
 *.ap_
 *.aab
