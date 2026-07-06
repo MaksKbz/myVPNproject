@@ -7,8 +7,6 @@ import android.util.Log
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
-import java.net.InetSocketAddress
-import java.net.Socket
 import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -43,7 +41,7 @@ class BypassVpnService : VpnService(), Runnable {
         isRunning = true
         executorService = Executors.newCachedThreadPool()
         vpnThread = Thread({ runVpn(allowedApps) }, "BypassVpnThread").apply { start() }
-        Log.i(TAG, "VPN service 1.06 started.")
+        Log.i(TAG, "VPN service 1.07 started.")
     }
 
     private fun stopVpn() {
@@ -60,7 +58,7 @@ class BypassVpnService : VpnService(), Runnable {
         executorService?.shutdownNow()
         executorService = null
         stopSelf()
-        Log.i(TAG, "VPN service 1.06 stopped.")
+        Log.i(TAG, "VPN service 1.07 stopped.")
     }
 
     override fun onDestroy() {
@@ -72,7 +70,7 @@ class BypassVpnService : VpnService(), Runnable {
 
     private fun runVpn(allowedApps: ArrayList<String>?) {
         try {
-            // КОНФИГУРАЦИЯ ИНТЕРФЕЙСА ДЛЯ ОБХОДА DPI В КАЗАХСТАНЕ (v1.06):
+            // КОНФИГУРАЦИЯ ИНТЕРФЕЙСА ДЛЯ ОБХОДА DPI (v1.07):
             // Для того чтобы выбранные приложения (например, Opera) могли успешно открывать 
             // заблокированные в Казахстане сайты, мы настраиваем глобальный перехват трафика Олицетворения.
             // addRoute("0.0.0.0", 0) перехватывает весь веб-трафик выбранного браузера.

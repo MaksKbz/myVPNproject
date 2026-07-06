@@ -137,7 +137,7 @@ fun VpnControlScreen(
             color = MaterialTheme.colorScheme.primary
         )
         Text(
-            text = "DPI Bypass VPN Client (v1.06)",
+            text = "DPI Bypass VPN Client (v1.07)",
             fontSize = 13.sp,
             color = Color.Gray,
             modifier = Modifier.padding(top = 2.dp, bottom = 16.dp)
@@ -196,7 +196,7 @@ fun VpnControlScreen(
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
-                            text = "ИНСТРУКЦИЯ ПО ТЕСТИРОВАНИЮ v1.06",
+                            text = "ИНСТРУКЦИЯ ПО ТЕСТИРОВАНИЮ v1.07",
                             fontWeight = FontWeight.Bold,
                             fontSize = 15.sp,
                             color = MaterialTheme.colorScheme.primary
