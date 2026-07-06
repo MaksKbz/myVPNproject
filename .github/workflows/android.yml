@@ -2,9 +2,9 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "master", "main" ]
   pull_request:
-    branches: [ "master" ]
+    branches: [ "master", "main" ]
   workflow_dispatch:
 
 permissions:
@@ -18,6 +18,8 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
     - name: Set up JDK 17
       uses: actions/setup-java@v4
@@ -42,7 +44,7 @@ jobs:
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: myVPNproject-debug-v1.08
+        name: myVPNproject-debug-v3.1.0
         path: app/build/outputs/apk/debug/app-debug.apk
         if-no-files-found: error
         retention-days: 30
@@ -50,9 +52,9 @@ jobs:
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: "v1.08"
-        name: "Release v1.08"
-        body: "Debug APK — DPI bypass VPN for Android (v1.08) with active TCP splitting"
+        tag_name: "v3.1.0"
+        name: "Release v3.1.0"
+        body: "Debug APK — DPI bypass VPN for Android (v3.1.0) with fully corrected Kotlin packet loop fallback to avoid blackhole routing"
         files: app/build/outputs/apk/debug/app-debug.apk
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
