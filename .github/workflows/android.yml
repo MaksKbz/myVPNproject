@@ -22,12 +22,12 @@ jobs:
         distribution: 'temurin'
 
     - name: Setup Gradle
-      uses: gradle/gradle-build-action@v2
+      uses: gradle/actions/setup-gradle@v3
+      with:
+        gradle-version: '8.2' # Указываем конкретную стабильную версию Gradle для сборки
 
     - name: Build with Gradle
       run: |
-        # Мы используем встроенную утилиту gradle в Ubuntu-раннере, чтобы не зависеть от заглушек gradle-wrapper.
-        # Инициализируем чистый рабочий gradle wrapper и запускаем сборку
         gradle wrapper
         chmod +x gradlew
         ./gradlew assembleDebug --stacktrace
