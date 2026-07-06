@@ -1,11 +1,17 @@
 package com.makskbz.myvpnproject
 
 import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -21,9 +27,14 @@ import com.makskbz.myvpnproject.vpn.BypassVpnService
 class MainActivity : ComponentActivity() {
     
     private val VPN_REQUEST_CODE = 1001
+    private var selectedPackages = mutableStateListOf<String>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Получаем список установленных пользовательских приложений
+        val installedApps = getInstalledAppsList()
+
         setContent {
             MaterialTheme {
                 Surface(
@@ -31,12 +42,28 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     VpnControlScreen(
+                        installedApps = installedApps,
+                        selectedPackages = selectedPackages,
                         onStartVpn = { startVpnEngine() },
                         onStopVpn = { stopVpnEngine() }
                     )
                 }
             }
         }
+    }
+
+    private fun getInstalledAppsList(): List<AppItem> {
+        val apps = mutableListOf<AppItem>()
+        val pm = packageManager
+        val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+        for (app in packages) {
+            // Отфильтровываем только пользовательские (несистемные) приложения для удобства выбора
+            if ((app.flags and ApplicationInfo.FLAG_SYSTEM) == 0 || app.packageName == "com.android.chrome" || app.packageName == "com.google.android.youtube") {
+                val name = app.loadLabel(pm).toString()
+                apps.add(AppItem(name, app.packageName))
+            }
+        }
+        return apps.sortedBy { it.name }
     }
 
     private fun startVpnEngine() {
@@ -60,37 +87,42 @@ class MainActivity : ComponentActivity() {
         if (requestCode == VPN_REQUEST_CODE && resultCode == RESULT_OK) {
             val intent = Intent(this, BypassVpnService::class.java).apply {
                 action = BypassVpnService.ACTION_START
+                putStringArrayListExtra(BypassVpnService.EXTRA_ALLOWED_APPS, ArrayList(selectedPackages))
             }
             startService(intent)
         }
     }
 }
 
+data class AppItem(val name: String, val packageName: String)
+
 @Composable
-fun VpnControlScreen(onStartVpn: () -> Unit, onStopVpn: () -> Unit) {
+fun VpnControlScreen(
+    installedApps: List<AppItem>,
+    selectedPackages: MutableList<String>,
+    onStartVpn: () -> Unit,
+    onStopVpn: () -> Unit
+) {
     var isRunning by remember { mutableStateOf(false) }
-    val scrollState = rememberScrollState()
+    var tabIndex by remember { mutableStateOf(0) }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp)
-            .verticalScroll(scrollState),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Top
+            .padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Spacer(modifier = Modifier.height(16.dp))
         Text(
             text = "myVPNproject",
-            fontSize = 32.sp,
+            fontSize = 28.sp,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.primary
         )
         Text(
-            text = "B4-inspired DPI Bypass VPN Client (v1.02)",
-            fontSize = 14.sp,
+            text = "DPI Bypass VPN Client (v1.04)",
+            fontSize = 13.sp,
             color = Color.Gray,
-            modifier = Modifier.padding(top = 4.dp, bottom = 24.dp)
+            modifier = Modifier.padding(top = 2.dp, bottom = 16.dp)
         )
 
         Button(
@@ -105,59 +137,102 @@ fun VpnControlScreen(onStartVpn: () -> Unit, onStopVpn: () -> Unit) {
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .height(56.dp),
+                .height(50.dp),
             colors = ButtonDefaults.buttonColors(
                 containerColor = if (isRunning) Color(0xFFE91E63) else Color(0xFF4CAF50)
             )
         ) {
             Text(
-                text = if (isRunning) "STOP VPN" else "START VPN",
-                fontSize = 18.sp,
+                text = if (isRunning) "ОСТАНОВИТЬ VPN" else "ЗАПУСТИТЬ VPN",
+                fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color.White
             )
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(16.dp))
 
-        // Секция с инструкцией на русском языке
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = "ИНСТРУКЦИЯ ПО ИСПОЛЬЗОВАНИЮ v1.02",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 16.sp,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "Данное приложение использует локальный интерфейс VPN (VpnService) Android без отправки трафика на внешние сервера (без-серверный обход DPI). Модификация пакетов происходит локально на вашем процессоре.",
-                    fontSize = 13.sp,
-                    lineHeight = 18.sp
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "Как это работает:\n" +
-                            "1. Нажмите зеленую кнопку 'START VPN'.\n" +
-                            "2. Разрешите системе Android создать VPN-подключение.\n" +
-                            "3. Приложение начнет перехватывать ваши исходящие запросы:\n" +
-                            "   • Трафик QUIC (UDP 443) блокируется. Это вынуждает приложения и сайты (например, YouTube) переключаться на TCP-протокол.\n" +
-                            "   • Пакеты TLS ClientHello фрагментируются. DPI-система провайдера видит разрозненные сегменты и не может распознать заблокированный домен (SNI).\n" +
-                            "   • Применяется защищенный сокет-транзит через защитные методы Android OS для исключения мертвых циклов и падения интернета.\n" +
-                            "   • Весь остальной сетевой трафик беспрепятственно передается в интернет.",
-                    fontSize = 13.sp,
-                    lineHeight = 18.sp
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "Внимание: Для корректной работы интернет-доступа убедитесь, что в системе не включены другие VPN-сервисы, а DNS-серверы вашего провайдера не блокируют запрашиваемые домены на уровне IP.",
-                    fontSize = 12.sp,
-                    color = Color.Gray,
-                    lineHeight = 16.sp
-                )
+        // Переключатель вкладок: Управление / Выбор приложений
+        TabRow(selectedTabIndex = tabIndex) {
+            Tab(selected = tabIndex == 0, onClick = { tabIndex = 0 }) {
+                Text(text = "Инструкция", modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
+            }
+            Tab(selected = tabIndex == 1, onClick = { tabIndex = 1 }) {
+                Text(text = "Приложения (${selectedPackages.size})", modifier = Modifier.padding(12.dp), fontWeight = FontWeight.Bold)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        if (tabIndex == 0) {
+            // Вкладка 1: Инструкция
+            val scrollState = rememberScrollState()
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(scrollState)
+            ) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "ИНСТРУКЦИЯ ПО ТЕСТИРОВАНИЮ",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Для проверки обхода блокировок DPI (например, YouTube или Discord):\n" +
+                                    "1. Перейдите на вкладку 'Приложения'.\n" +
+                                    "2. Отметьте галочками те приложения, в которых нужно обойти ограничения (например, Google Chrome или YouTube).\n" +
+                                    "3. Вернитесь на эту вкладку и нажмите зеленую кнопку 'ЗАПУСТИТЬ VPN'.\n" +
+                                    "4. Откройте выбранное приложение — весь его трафик будет десинхронизироваться и фрагментироваться локально на вашем процессоре, обходя DPI провайдера.\n" +
+                                    "5. Все остальные (не отмеченные) приложения будут ходить в интернет напрямую без VPN-прослойки, сохраняя максимальную скорость.",
+                            fontSize = 13.sp,
+                            lineHeight = 18.sp
+                        )
+                    }
+                }
+            }
+        } else {
+            // Вкладка 2: Выбор приложений для туннелирования
+            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                items(installedApps) { app ->
+                    val isChecked = selectedPackages.contains(app.packageName)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                if (isChecked) {
+                                    selectedPackages.remove(app.packageName)
+                                } else {
+                                    selectedPackages.add(app.packageName)
+                                }
+                            }
+                            .padding(vertical = 10.dp, horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = isChecked,
+                            onCheckedChange = { checked ->
+                                if (checked == true) {
+                                    selectedPackages.add(app.packageName)
+                                } else {
+                                    selectedPackages.remove(app.packageName)
+                                }
+                            }
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(text = app.name, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                            Text(text = app.packageName, fontSize = 12.sp, color = Color.Gray)
+                        }
+                    }
+                    Divider()
+                }
             }
         }
     }
