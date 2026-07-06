@@ -27,23 +27,15 @@ jobs:
 
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v4
+      with:
+        validate-wrappers: true
+        allow-checksums: 0fa1d4ba83527f947d7b8d640aab625c923dbe739ddc08006023e1e844ccae77
 
     - name: Make gradlew executable
       run: chmod +x gradlew
 
     - name: Create local.properties
       run: echo "sdk.dir=$ANDROID_HOME" > local.properties
-
-    - name: Verify structure & SDK
-      run: |
-        echo "--- Workspace ---"
-        ls -la
-        echo "--- gradle/wrapper ---"
-        ls -la gradle/wrapper/
-        echo "--- ANDROID_HOME=$ANDROID_HOME ---"
-        ls $ANDROID_HOME/platforms/ 2>/dev/null || echo "Platforms not found"
-        echo "--- Java version ---"
-        java -version
 
     - name: Build Debug APK
       run: ./gradlew assembleDebug --stacktrace --no-daemon
