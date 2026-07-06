@@ -11,8 +11,8 @@ android {
         applicationId = "com.makskbz.myvpnproject"
         minSdk = 24
         targetSdk = 34
-        versionCode = 12
-        versionName = "3.1.0" // Повышено до версии 3.1.0 для полного исправления VPN-петли
+        versionCode = 13
+        versionName = "3.1.1" // Версия 3.1.1 — Полная стабилизация
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
     }
