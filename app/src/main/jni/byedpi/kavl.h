@@ -20,7 +20,7 @@
         const __type *stack[KAVL_MAX_DEPTH];                                   \
         int top;                                                               \
     };                                                                         \
-    __scope void kavl_insert_##suf(__type **root_, __type *x,                  \
+    __scope __type *kavl_insert_##suf(__type **root_, __type *x,                  \
                                    unsigned *cnt_) {                           \
         __type *p, *b[KAVL_MAX_DEPTH], *path[KAVL_MAX_DEPTH];                  \
         int i = 0, d = 0, c = 0;                                               \
@@ -28,11 +28,11 @@
         b[0] = *root_;                                                         \
         if (!b[0]) {                                                           \
             *root_ = x; x->__head.balance__ = 0;                               \
-            if (cnt_) ++*cnt_; return;                                         \
+            if (cnt_) ++*cnt_; return x;                                         \
         }                                                                      \
         while ((t = b[d]) != 0) {                                              \
             c = __cmp(x, t);                                                   \
-            if (c == 0) return;                                                \
+            if (c == 0) return t;                                                \
             path[i] = t;                                                       \
             b[++d] = c < 0 ? t->__head.left__ : t->__head.right__;            \
             ++i;                                                               \
@@ -44,6 +44,7 @@
             else        path[i-1]->__head.right__ = x;                        \
         }                                                                      \
         (void)p;                                                               \
+        return x; \
     }                                                                          \
     __scope __type *kavl_find_##suf(const __type *root_,                       \
                                     const __type *x) {                         \
