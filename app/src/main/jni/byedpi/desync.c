@@ -28,6 +28,13 @@
 #define DEFAULT_TTL 8
 #define ERR_WAIT -12
 
+/* Forward declaration: gen_offset is defined later in this file.
+ * get_tcp_fake (above it) calls gen_offset, so Clang NDK 27
+ * requires the prototype to appear first. */
+static long gen_offset(long pos, int flag,
+                       const char *buffer, size_t n, long lp,
+                       struct proto_info *info);
+
 int setttl(int fd, int ttl) {
     int ret6 = setsockopt(fd, IPPROTO_IPV6, IPV6_UNICAST_HOPS, (char *)&ttl, sizeof(ttl));
     int ret4 = setsockopt(fd, IPPROTO_IP, IP_TTL, (char *)&ttl, sizeof(ttl));

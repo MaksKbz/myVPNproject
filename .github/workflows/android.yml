@@ -18,68 +18,63 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
-    - name: Checkout Source Code
-      uses: actions/checkout@v4
-      with:
-        # Шаг 1: клонируем submodule-ы (если добавлены byedpi/badvpn)
-        submodules: recursive
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    - name: Set up JDK 17
-      uses: actions/setup-java@v4
-      with:
-        java-version: '17'
-        distribution: 'temurin'
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
-    - name: Setup Android NDK
-      # Шаг 2: NDK 27 — нужен для CMake + ciadpi_jni / tun2socks_jni
-      uses: android-actions/setup-android@v3
-      with:
-        cmdline-tools-version: '11076708'
-        log-accepted-android-sdk-licenses: false
+      - name: Setup Android NDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: '11076708'
+          log-accepted-android-sdk-licenses: false
 
-    - name: Install NDK 27
-      run: yes | sdkmanager "ndk;27.0.12077973" --sdk_root=$ANDROID_HOME
+      - name: Install NDK 27
+        run: yes | sdkmanager "ndk;27.0.12077973" --sdk_root=$ANDROID_HOME
 
-    - name: Setup Gradle
-      uses: gradle/actions/setup-gradle@v4
-      with:
-        validate-wrappers: false
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          validate-wrappers: false
 
-    - name: Make gradlew executable
-      run: chmod +x gradlew
+      - name: Make gradlew executable
+        run: chmod +x gradlew
 
-    - name: Create local.properties
-      run: |
-        echo "sdk.dir=$ANDROID_HOME" > local.properties
-        echo "ndk.dir=$ANDROID_HOME/ndk/27.0.12077973" >> local.properties
+      - name: Create local.properties
+        run: |
+          # ndk.dir intentionally omitted: NDK path is resolved
+          # exclusively via ndkVersion in build.gradle.kts to avoid CXX5106.
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
 
-    - name: Build Debug APK
-      run: ./gradlew assembleDebug --stacktrace --no-daemon
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace --no-daemon
 
-    - name: Upload APK Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: myVPNproject-debug-v3.3.0-native
-        path: app/build/outputs/apk/debug/app-debug.apk
-        if-no-files-found: error
-        retention-days: 30
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: myVPNproject-debug-v3.3.0-native
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
 
-    - name: Create GitHub Release
-      # Только на master-ветке, не на feature-ветке
-      if: github.ref == 'refs/heads/master'
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: "v3.3.0-native"
-        name: "Release v3.3.0-native"
-        body: |
-          ## myVPNproject v3.3.0-native
-
-          **Архитектура:** TUN → tun2socks (JNI) → SOCKS5 → ciadpi (JNI) → интернет
-
-          **Статус stub:** нативные библиотеки компилируются, JNI-мосты работают.
-          Реальный DPI-обход активируется после `git submodule add` byedpi + badvpn.
-
-          См. `NATIVE_ENGINE_SETUP.md` — полная инструкция.
-        files: app/build/outputs/apk/debug/app-debug.apk
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create GitHub Release
+        if: github.ref == 'refs/heads/master'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v3.3.0-native"
+          name: "Release v3.3.0-native"
+          body: |
+            ## myVPNproject v3.3.0-native
+            **Архитектура:** TUN → tun2socks (JNI) → SOCKS5 → ciadpi (JNI) → интернет
+            **Статус stub:** нативные библиотеки компилируются, JNI-мосты работают.
+            Реальный DPI-обход активируется после `git submodule add` byedpi + badvpn.
+            См. `NATIVE_ENGINE_SETUP.md` — полная инструкция.
+          files: app/build/outputs/apk/debug/app-debug.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
