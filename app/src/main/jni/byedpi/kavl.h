@@ -119,7 +119,7 @@
     }
 
 #define KAVL_INIT(suf, __type, __head, __cmp) \
-    KAVL_INIT2(suf, static inline, __type, __head, __cmp)
+    KAVL_INIT2(suf, static inline __attribute__((unused)), __type, __head, __cmp)
 
 /* Convenience wrappers that match the mpool.c call convention:
  * kavl_find(suf, root, x, extra)  → kavl_find_##suf(root, x)
