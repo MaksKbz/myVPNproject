@@ -1,9 +1,7 @@
 package com.makskbz.myvpnproject.vpn
 
 import android.content.Context
-import androidx.preference.PreferenceManager
-import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
+import org.json.JSONObject
 
 // ==============================================================================
 // Модели данных
@@ -12,6 +10,7 @@ import com.google.gson.reflect.TypeToken
 /**
  * Основная конфигурация приложения.
  * Сериализуется в JSON и хранится в SharedPreferences.
+ * Использует только стандартный Android API (без Gson и androidx.preference).
  */
 data class BypassConfig(
     val presetName: String = "universal",
@@ -50,11 +49,10 @@ val PRESETS: List<Preset> = listOf(
         description = "Рекомендуется по умолчанию. OOB по SNI + Disorder + авто-переключение.",
         config = BypassConfig(
             presetName = "universal",
-            // CLI: -Ku -a1 -An -o1+s -At,r,s -d1
             udpFakeCount = 1,
-            autoMode = "n",             // -An: авто при отсутствии блокировки
-            oobPosition = "1+s",         // -o1+s: OOB после SNI
-            disorderPosition = "1",      // -d1: disorder на 1 байт
+            autoMode = "n",
+            oobPosition = "1+s",
+            disorderPosition = "1",
             fakeEnabled = false
         )
     ),
@@ -64,7 +62,6 @@ val PRESETS: List<Preset> = listOf(
         description = "Split + Disorder + Drop SACK + OOB + TLS Record split + Fake.",
         config = BypassConfig(
             presetName = "youtube",
-            // CLI: -s1 -q1 -Y -Ar -s5 -o1+s -At -f-1 -r1+s -As
             splitPosition = "1",
             disorderPosition = "1",
             oobPosition = "1+s",
@@ -81,7 +78,6 @@ val PRESETS: List<Preset> = listOf(
         description = "Split + Disorder + Fake + HTTP modification.",
         config = BypassConfig(
             presetName = "telegram",
-            // CLI: -s1 -d1 -f -t8 -At,r,s -M h,d,r
             splitPosition = "1",
             disorderPosition = "1",
             fakeEnabled = true,
@@ -96,7 +92,6 @@ val PRESETS: List<Preset> = listOf(
         description = "Split + OOB. Минимальное потребление CPU и батареи.",
         config = BypassConfig(
             presetName = "minimal",
-            // CLI: -s1 -o1
             splitPosition = "1",
             oobPosition = "1"
         )
@@ -107,7 +102,6 @@ val PRESETS: List<Preset> = listOf(
         description = "Все методы одновременно. Для упрямых блокировок.",
         config = BypassConfig(
             presetName = "aggressive",
-            // CLI: -s1+s -d1+s -f -t8 -Y -M h,d,r -r1+s
             splitPosition = "1+s",
             disorderPosition = "1+s",
             fakeEnabled = true,
@@ -120,67 +114,95 @@ val PRESETS: List<Preset> = listOf(
 )
 
 // ==============================================================================
-// ConfigManager
+// ConfigManager — хранение без Gson и androidx.preference
 // ==============================================================================
 
 object ConfigManager {
 
+    private const val PREFS_NAME = "myvpn_prefs"
     private const val PREF_KEY = "bypass_config_v3"
-    private val gson = Gson()
 
     fun loadConfig(context: Context): BypassConfig {
-        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val json = prefs.getString(PREF_KEY, null) ?: return PRESETS[0].config
         return try {
-            gson.fromJson(json, BypassConfig::class.java)
+            fromJson(json)
         } catch (e: Exception) {
             PRESETS[0].config
         }
     }
 
     fun saveConfig(context: Context, config: BypassConfig) {
-        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
-        prefs.edit().putString(PREF_KEY, gson.toJson(config)).apply()
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putString(PREF_KEY, toJson(config)).apply()
     }
 
     fun loadPreset(id: String): BypassConfig =
         PRESETS.find { it.id == id }?.config ?: PRESETS[0].config
 
+    // ── Простая JSON-сериализация через org.json (входит в Android SDK) ──
+
+    private fun toJson(c: BypassConfig): String {
+        val o = JSONObject()
+        o.put("presetName", c.presetName)
+        o.put("socksPort", c.socksPort)
+        c.splitPosition?.let    { o.put("splitPosition", it) }
+        c.disorderPosition?.let { o.put("disorderPosition", it) }
+        c.oobPosition?.let      { o.put("oobPosition", it) }
+        o.put("fakeEnabled", c.fakeEnabled)
+        o.put("fakeTtl", c.fakeTtl)
+        o.put("dropSack", c.dropSack)
+        c.tlsRec?.let   { o.put("tlsRec", it) }
+        c.modHttp?.let  { o.put("modHttp", it) }
+        c.autoMode?.let { o.put("autoMode", it) }
+        c.udpFakeCount?.let { o.put("udpFakeCount", it) }
+        val arr = org.json.JSONArray()
+        c.allowedApps.forEach { arr.put(it) }
+        o.put("allowedApps", arr)
+        return o.toString()
+    }
+
+    private fun fromJson(json: String): BypassConfig {
+        val o = JSONObject(json)
+        val apps = mutableListOf<String>()
+        val arr = o.optJSONArray("allowedApps")
+        if (arr != null) {
+            for (i in 0 until arr.length()) apps.add(arr.getString(i))
+        }
+        return BypassConfig(
+            presetName       = o.optString("presetName", "universal"),
+            socksPort        = o.optInt("socksPort", 1080),
+            splitPosition    = o.optString("splitPosition").ifEmpty { null },
+            disorderPosition = o.optString("disorderPosition").ifEmpty { null },
+            oobPosition      = o.optString("oobPosition").ifEmpty { null },
+            fakeEnabled      = o.optBoolean("fakeEnabled", false),
+            fakeTtl          = o.optInt("fakeTtl", 8),
+            dropSack         = o.optBoolean("dropSack", false),
+            tlsRec           = o.optString("tlsRec").ifEmpty { null },
+            modHttp          = o.optString("modHttp").ifEmpty { null },
+            autoMode         = o.optString("autoMode").ifEmpty { null },
+            udpFakeCount     = if (o.has("udpFakeCount")) o.getInt("udpFakeCount") else null,
+            allowedApps      = apps
+        )
+    }
+
     /**
      * Конвертирует BypassConfig в массив CLI-аргументов для ciadpi.
-     * Порядок соответствует документации ByeDPI.
      */
     fun toCliArgs(config: BypassConfig): Array<String> {
         val args = mutableListOf<String>()
-
-        // Порт SOCKS5
         args += listOf("-p", config.socksPort.toString())
-
-        // UDP: фейковые пакеты (для QUIC-обхода)
         config.udpFakeCount?.let { args += listOf("-a", it.toString()) }
-
-        // Фрагментация
         config.splitPosition?.let    { args += listOf("-s", it) }
         config.disorderPosition?.let { args += listOf("-d", it) }
         config.oobPosition?.let      { args += listOf("-o", it) }
-
-        // Fake-пакет
         if (config.fakeEnabled) {
             args += listOf("-f", "-t", config.fakeTtl.toString())
         }
-
-        // TLS Record Split
         config.tlsRec?.let { args += listOf("-r", it) }
-
-        // HTTP-модификация
         config.modHttp?.let { args += listOf("-M", it) }
-
-        // Drop SACK
         if (config.dropSack) args += "-Y"
-
-        // Auto-mode
         config.autoMode?.let { args += listOf("-A", it) }
-
         return args.toTypedArray()
     }
 }

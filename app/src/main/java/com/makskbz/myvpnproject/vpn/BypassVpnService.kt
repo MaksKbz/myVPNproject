@@ -18,6 +18,7 @@ class BypassVpnService : VpnService(), Runnable {
         const val ACTION_START = "START"
         const val ACTION_STOP = "STOP"
         const val EXTRA_ALLOWED_APPS = "ALLOWED_APPS"
+        const val EXTRA_PRESET_ID = "PRESET_ID"  // используется в MainActivity
     }
 
     private var vpnThread: Thread? = null
@@ -70,22 +71,14 @@ class BypassVpnService : VpnService(), Runnable {
 
     private fun runVpn(allowedApps: ArrayList<String>?) {
         try {
-            // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ АРХИТЕКТУРЫ (Fallback на PacketProcessor):
-            // Так как нативная библиотека tun2socks_jni.c на данном этапе разработки является
-            // no-op заглушкой, весь входящий трафик уходил в черную дыру, блокируя интернет.
-            // Мы полностью переключаем службу на работу через проверенный и 100% рабочий
-            // Userspace-цикл на Kotlin, вызывающий PacketProcessor.processPacket().
-            // Это гарантирует стабильную фрагментацию TCP и блокировку QUIC прямо сейчас!
-
             val builder = Builder()
                 .setSession("myVPNproject")
                 .addAddress("10.0.0.2", 24)
-                .addRoute("0.0.0.0", 0)     // Перехватываем весь IPv4 трафик целевого приложения
-                .addDnsServer("1.1.1.1")     // DoH резолвер Cloudflare
-                .addDnsServer("8.8.8.8")     // DoH резолвер Google
-                .setMtu(1400) // MTU скорректирован до 1400 для идеальной совместимости с фрагментацией
+                .addRoute("0.0.0.0", 0)
+                .addDnsServer("1.1.1.1")
+                .addDnsServer("8.8.8.8")
+                .setMtu(1400)
 
-            // Применяем выборочное туннелирование (Split Tunneling)
             if (allowedApps != null && allowedApps.isNotEmpty()) {
                 Log.i(TAG, "Applying Split Tunneling for apps: $allowedApps")
                 for (packageName in allowedApps) {
@@ -96,7 +89,6 @@ class BypassVpnService : VpnService(), Runnable {
                     }
                 }
             } else {
-                // Если пользователь ничего не выбрал, по умолчанию направляем Оперу и Chrome
                 try {
                     builder.addAllowedApplication("com.opera.browser")
                     builder.addAllowedApplication("com.android.chrome")
