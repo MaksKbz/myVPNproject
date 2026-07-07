@@ -4,8 +4,12 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <time.h>
+#include <stdio.h>
+#include <netinet/in.h>
 #include "kavl.h"
-#include "params.h"
+
+/* Forward declaration to break circular include with params.h */
+struct desync_params;
 
 #define CMP_BYTES 0
 #define CMP_BITS  1
