@@ -1,9 +1,11 @@
 package com.makskbz.myvpnproject
 
+import android.Manifest
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -25,20 +27,31 @@ import androidx.compose.ui.unit.sp
 import com.makskbz.myvpnproject.vpn.BypassVpnService
 import com.makskbz.myvpnproject.vpn.ConfigManager
 import com.makskbz.myvpnproject.vpn.PRESETS
-import com.makskbz.myvpnproject.vpn.Preset
 
 data class AppItem(val name: String, val packageName: String)
 
 class MainActivity : ComponentActivity() {
 
     private val VPN_REQUEST_CODE = 1001
+    private val NOTIF_PERMISSION_CODE = 2001
     private var selectedPackages = mutableStateListOf<String>()
     private var selectedPresetId = mutableStateOf("universal")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Восстанавливаем сохранённую конфигурацию
+        // Исправление #1 (КРИТИЧЕСКОЕ): запрашиваем POST_NOTIFICATIONS на Android 13+
+        // Без этого foreground-уведомление не появится и система может убить сервис.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                    != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    NOTIF_PERMISSION_CODE
+                )
+            }
+        }
+
         val savedConfig = ConfigManager.loadConfig(this)
         selectedPresetId.value = savedConfig.presetName
         selectedPackages.addAll(savedConfig.allowedApps)
@@ -52,12 +65,12 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     MainScreen(
-                        installedApps = installedApps,
+                        installedApps    = installedApps,
                         selectedPackages = selectedPackages,
                         selectedPresetId = selectedPresetId,
-                        onStartVpn  = { requestVpnPermission() },
-                        onStopVpn   = { stopVpnService() },
-                        onSaveConfig = { presetId ->
+                        onStartVpn       = { requestVpnPermission() },
+                        onStopVpn        = { stopVpnService() },
+                        onSaveConfig     = { presetId ->
                             selectedPresetId.value = presetId
                             val cfg = ConfigManager.loadPreset(presetId)
                                 .copy(allowedApps = selectedPackages.toList())
@@ -70,23 +83,22 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun getInstalledAppsList(): List<AppItem> {
-        val apps = mutableListOf<AppItem>()
         val pm = packageManager
         return try {
-            val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-            for (app in packages) {
-                val isSystem = (app.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-                val isEssential = listOf("chrome", "browser", "opera", "firefox",
-                    "discord", "telegram", "youtube", "instagram", "tiktok")
-                    .any { app.packageName.contains(it) }
-                if (!isSystem || isEssential) {
-                    apps.add(AppItem(app.loadLabel(pm).toString(), app.packageName))
+            pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                .filter { app ->
+                    val isSystem = (app.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                    val isEssential = listOf(
+                        "chrome", "browser", "opera", "firefox",
+                        "discord", "telegram", "youtube", "instagram", "tiktok"
+                    ).any { app.packageName.contains(it) }
+                    !isSystem || isEssential
                 }
-            }
-            apps.sortedBy { it.name }
+                .map { AppItem(it.loadLabel(pm).toString(), it.packageName) }
+                .sortedBy { it.name }
         } catch (e: Exception) {
             Log.e("MainActivity", "Error loading apps", e)
-            apps
+            emptyList()
         }
     }
 
@@ -105,11 +117,9 @@ class MainActivity : ComponentActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == VPN_REQUEST_CODE && resultCode == RESULT_OK) {
-            // Сохраняем конфиг перед запуском
             val cfg = ConfigManager.loadPreset(selectedPresetId.value)
                 .copy(allowedApps = selectedPackages.toList())
             ConfigManager.saveConfig(this, cfg)
-
             startService(Intent(this, BypassVpnService::class.java).apply {
                 action = BypassVpnService.ACTION_START
                 putExtra(BypassVpnService.EXTRA_PRESET_ID, selectedPresetId.value)
@@ -123,7 +133,7 @@ class MainActivity : ComponentActivity() {
 }
 
 // ==============================================================================
-// UI: Jetpack Compose — 3 вкладки: Пресеты / Приложения / Инструкция
+// UI: Jetpack Compose — 3 вкладки: Пресеты / Приложения / Справка
 // ==============================================================================
 
 @Composable
@@ -144,21 +154,20 @@ fun MainScreen(
             .padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // --- Заголовок ---
         Text(
             text = "myVPNproject",
             fontSize = 26.sp,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.primary
         )
+        // Исправление #2: актуальная версия и архитектура
         Text(
-            text = "DPI Bypass v3.0 • ciadpi engine",
+            text = "DPI Bypass v3.2.0 \u2022 Kotlin userspace engine",
             fontSize = 12.sp,
             color = Color.Gray,
             modifier = Modifier.padding(bottom = 12.dp)
         )
 
-        // --- Кнопка Старт/Стоп ---
         Button(
             onClick = {
                 if (isRunning) { onStopVpn(); isRunning = false }
@@ -170,30 +179,31 @@ fun MainScreen(
             )
         ) {
             Text(
-                text = if (isRunning) "⏹ ОСТАНОВИТЬ VPN" else "▶ ЗАПУСТИТЬ VPN",
+                text = if (isRunning) "\u23f9 ОСТАНОВИТЬ VPN" else "\u25b6 ЗАПУСТИТЬ VPN",
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color.White
             )
         }
 
-        // Статус
         Text(
-            text = if (isRunning) "● Активен | Пресет: ${selectedPresetId.value}"
-                   else            "○ Остановлен",
+            text = if (isRunning) "\u25cf Активен | Пресет: ${selectedPresetId.value}"
+                   else            "\u25cb Остановлен",
             fontSize = 13.sp,
             color = if (isRunning) Color(0xFF4CAF50) else Color.Gray,
             modifier = Modifier.padding(vertical = 8.dp)
         )
 
-        // --- Вкладки ---
         TabRow(selectedTabIndex = tabIndex) {
             Tab(selected = tabIndex == 0, onClick = { tabIndex = 0 }) {
                 Text("Пресеты", modifier = Modifier.padding(10.dp), fontWeight = FontWeight.Bold)
             }
             Tab(selected = tabIndex == 1, onClick = { tabIndex = 1 }) {
-                Text("Приложения (${selectedPackages.size})",
-                    modifier = Modifier.padding(10.dp), fontWeight = FontWeight.Bold)
+                Text(
+                    "Приложения (${selectedPackages.size})",
+                    modifier = Modifier.padding(10.dp),
+                    fontWeight = FontWeight.Bold
+                )
             }
             Tab(selected = tabIndex == 2, onClick = { tabIndex = 2 }) {
                 Text("Справка", modifier = Modifier.padding(10.dp), fontWeight = FontWeight.Bold)
@@ -245,17 +255,15 @@ fun PresetsTab(
                         )
                         if (isSelected) {
                             Spacer(Modifier.width(8.dp))
-                            Text("✓", color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.Bold)
+                            Text(
+                                "\u2713",
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                     Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = preset.description,
-                        fontSize = 12.sp,
-                        color = Color.Gray
-                    )
-                    // CLI-параметры
+                    Text(text = preset.description, fontSize = 12.sp, color = Color.Gray)
                     val cliArgs = ConfigManager.toCliArgs(preset.config).joinToString(" ")
                     if (cliArgs.isNotBlank()) {
                         Spacer(Modifier.height(6.dp))
@@ -316,6 +324,7 @@ fun HelpTab() {
             .fillMaxSize()
             .verticalScroll(scroll)
     ) {
+        // Карточка 1: Инструкция для пользователя
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
@@ -330,20 +339,20 @@ fun HelpTab() {
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "1. Выберите пресет на вкладке 'Пресеты'.\n" +
-                    "   • Универсальный — для большинства случаев.\n" +
-                    "   • YouTube — если YouTube заблокирован.\n" +
-                    "   • Telegram — для обхода блокировок Telegram.\n" +
-                    "   • Минимальный — экономия батареи.\n" +
-                    "   • Максимальный — если остальные не помогли.\n\n" +
-                    "2. На вкладке 'Приложения' отметьте браузеры\n" +
+                    "1. Выберите пресет на вкладке \u2018Пресеты\u2019.\n" +
+                    "   \u2022 Универсальный \u2014 для большинства случаев.\n" +
+                    "   \u2022 YouTube \u2014 если YouTube заблокирован.\n" +
+                    "   \u2022 Telegram \u2014 для обхода блокировок Telegram.\n" +
+                    "   \u2022 Минимальный \u2014 экономия батареи.\n" +
+                    "   \u2022 Максимальный \u2014 если остальные не помогли.\n\n" +
+                    "2. На вкладке \u2018Приложения\u2019 отметьте браузеры\n" +
                     "   и приложения, трафик которых нужно обходить.\n\n" +
-                    "3. Нажмите 'ЗАПУСТИТЬ VPN'.\n\n" +
+                    "3. Нажмите \u2018ЗАПУСТИТЬ VPN\u2019.\n\n" +
                     "Как работает:\n" +
                     "Трафик перехватывается локально на устройстве\n" +
-                    "(не уходит на внешний сервер). Пакеты изменяются\n" +
-                    "так, чтобы DPI провайдера не распознал сигнатуру\n" +
-                    "блокируемого ресурса.",
+                    "(не уходит на внешний сервер). TLS ClientHello\n" +
+                    "разбивается на фрагменты \u2014 DPI провайдера не\n" +
+                    "распознаёт сигнатуру блокируемого ресурса.",
                     fontSize = 13.sp,
                     lineHeight = 19.sp
                 )
@@ -352,6 +361,7 @@ fun HelpTab() {
 
         Spacer(Modifier.height(12.dp))
 
+        // Исправление #3: актуальная карточка разработчика без ссылок на удалённые JNI-файлы
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
@@ -360,23 +370,23 @@ fun HelpTab() {
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    "Для разработчиков",
+                    "Архитектура v3.2.0",
                     fontWeight = FontWeight.Bold, fontSize = 15.sp,
                     color = MaterialTheme.colorScheme.primary
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Для активации нативного движка добавьте submodule:\n\n" +
-                    "git submodule add\n" +
-                    "  https://github.com/hufrea/byedpi.git\n" +
-                    "  app/src/main/jni/ciadpi\n\n" +
-                    "git submodule add\n" +
-                    "  https://github.com/ambrop72/badvpn.git\n" +
-                    "  app/src/main/jni/tun2socks\n\n" +
-                    "Затем раскомментируйте #include в:\n" +
-                    "  ciadpi_jni.c\n" +
-                    "  tun2socks_jni.c\n\n" +
-                    "Подробнее: см. README.md",
+                    "Текущая архитектура: Kotlin userspace\n" +
+                    "Трафик: TUN \u2192 PacketProcessor.kt (TCP split)\n\n" +
+                    "Движок:\n" +
+                    "  \u2022 TCP фрагментация TLS ClientHello\n" +
+                    "  \u2022 QUIC/UDP 443 \u2014 дроп (fallback на TCP)\n" +
+                    "  \u2022 Случайная точка сплита (1\u20135 байт)\n" +
+                    "  \u2022 Пересчёт IP/TCP чексумм\n\n" +
+                    "Следующий этап:\n" +
+                    "Нативный движок ciadpi через JNI (byedpi).\n" +
+                    "Детали: github.com/MaksKbz/myVPNproject\n" +
+                    "        \u2192 AUDIT_AND_ROADMAP.md",
                     fontSize = 12.sp,
                     lineHeight = 18.sp,
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
