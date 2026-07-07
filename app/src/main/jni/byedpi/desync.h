@@ -22,8 +22,4 @@ int  setttl(int fd, int ttl);
 int  pre_desync(int sfd, struct desync_params *dp);
 int  post_desync(int sfd, struct desync_params *dp);
 
-static inline long gen_offset(long pos, int flag,
-        const char *buffer, size_t n, long lp,
-        struct proto_info *info);
-
 #endif
