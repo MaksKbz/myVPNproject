@@ -19,6 +19,11 @@
 #include "desync.h"
 #include "packets.h"
 
+/* Forward declaration to allow socket_mod() to call protect() */
+#ifdef __linux__
+static int protect(int conn_fd, const char *path);
+#endif
+
 static int set_timeout(int fd, unsigned int s) {
 #ifdef __linux__
     if (setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, (char *)&s, sizeof(s))) {
