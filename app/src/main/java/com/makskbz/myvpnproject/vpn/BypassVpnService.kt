@@ -96,7 +96,6 @@ class BypassVpnService : VpnService(), Runnable {
                 .addRoute("0.0.0.0", 0)
                 .addDnsServer("1.1.1.1")
                 .addDnsServer("8.8.8.8")
-                .setAddDisallowedApplication(false)
                 .setMtu(1400) // 1400 безопаснее для фрагментации, чем 1500
 
             if (!allowedApps.isNullOrEmpty()) {
