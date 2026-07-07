@@ -60,6 +60,164 @@ static char *strncasestr(const char *a, size_t as,
     return 0;
 }
 
+static size_t find_tls_ext_offset(uint16_t type,
+        const char *data, size_t size, size_t skip) {
+    if (size <= (skip + 2)) { return 0; }
+    uint16_t ext_len = ANTOHS(data, skip);
+    skip += 2;
+    if (ext_len < (size - skip)) { size = ext_len + skip; }
+    while ((skip + 4) < size) {
+        uint16_t epyt = ANTOHS(data, skip);
+        if (type == epyt) { return skip; }
+        uint16_t len = ANTOHS(data, skip + 2);
+        skip += (len + 4);
+    }
+    return 0;
+}
+
+static size_t find_ext_block(const char *data, size_t size) {
+    if (size < 44) { return 0; }
+    uint8_t sid_len = data[43];
+    if (size < (44lu + sid_len + 2)) { return 0; }
+    uint16_t cip_len = ANTOHS(data, 44 + sid_len);
+    size_t skip = 44 + sid_len + 2 + cip_len + 2;
+    return skip > size ? 0 : skip;
+}
+
+static int merge_tls_records(char *buffer, ssize_t n) {
+    if (n < 5) { return 0; }
+    uint16_t full_sz = 0;
+    uint16_t r_sz = ANTOHS(buffer, 3);
+    int i = 0;
+    while (1) {
+        full_sz += r_sz;
+        if (5 + full_sz > n - 5 || buffer[5 + full_sz] != *buffer) { break; }
+        r_sz = ANTOHS(buffer, 5 + full_sz + 3);
+        if (full_sz + 10 + r_sz > n) { break; }
+        memmove(buffer + 5 + full_sz, buffer + 10 + full_sz, n - (10 + full_sz));
+        i++;
+    }
+    SHTONA(buffer, 3, full_sz);
+    SHTONA(buffer, 7, full_sz - 4);
+    return i * 5;
+}
+
+static void copy_name(char *out, const char *name, size_t out_len) {
+    for (size_t i = 0; i < out_len; i++) {
+        switch (name[i]) {
+            case '*':;
+                int r = rand() % (10 + 'z' - 'a' + 1);
+                out[i] = (r < 10 ? '0' : ('a' - 10)) + r;
+                break;
+            case '?': out[i] = 'a' + (rand() % ('z' - 'a' + 1)); break;
+            case '#': out[i] = '0' + (rand() % 10); break;
+            default: out[i] = name[i];
+        }
+    }
+}
+
+static int remove_ks_group(char *buffer, ssize_t n, size_t skip, uint16_t group) {
+    ssize_t ks_offs = find_tls_ext_offset(0x0033, buffer, n, skip);
+    if (!ks_offs || ks_offs + 6 >= n) { return 0; }
+    int ks_sz = ANTOHS(buffer, ks_offs + 2);
+    if (ks_offs + 4 + ks_sz > n) { return 0; }
+    ssize_t g_offs = ks_offs + 4 + 2;
+    while (g_offs + 4 < ks_offs + 4 + ks_sz) {
+        uint16_t g_sz = ANTOHS(buffer, g_offs + 2);
+        if (ks_offs + 4 + g_sz > n) { return 0; }
+        uint16_t g_tp = ANTOHS(buffer, g_offs);
+        if (g_tp == group) {
+            ssize_t g_end = g_offs + 4 + g_sz;
+            memmove(buffer + g_offs, buffer + g_end, n - g_end);
+            SHTONA(buffer, ks_offs + 2, ks_sz - (4 + g_sz));
+            SHTONA(buffer, ks_offs + 4, ks_sz - (4 + g_sz) - 2);
+            return 4 + g_sz;
+        }
+        g_offs += 4 + g_sz;
+    }
+    return 0;
+}
+
+static int remove_tls_ext(char *buffer, ssize_t n, size_t skip, uint16_t type) {
+    ssize_t ext_offs = find_tls_ext_offset(type, buffer, n, skip);
+    if (!ext_offs) { return 0; }
+    uint16_t ext_sz = ANTOHS(buffer, ext_offs + 2);
+    ssize_t ext_end = ext_offs + 4 + ext_sz;
+    if (ext_end > n) { return 0; }
+    memmove(buffer + ext_offs, buffer + ext_end, n - ext_end);
+    return ext_sz + 4;
+}
+
+static int resize_ech_ext(char *buffer, ssize_t n, size_t skip, int inc) {
+    ssize_t ech_offs = find_tls_ext_offset(0xfe0d, buffer, n, skip);
+    if (!ech_offs) { return 0; }
+    uint16_t ech_sz = ANTOHS(buffer, ech_offs + 2);
+    ssize_t ech_end = ech_offs + 4 + ech_sz;
+    if (ech_sz < 12 || ech_end > n) { return 0; }
+    uint16_t enc_sz = ANTOHS(buffer, ech_offs + 4 + 6);
+    ssize_t pay_offs = ech_offs + 4 + 8 + enc_sz;
+    uint16_t pay_sz = ech_sz - (8 + enc_sz + 2);
+    if (pay_offs + 2 > n) { return 0; }
+    if (pay_sz < -inc) { inc = -pay_sz; }
+    SHTONA(buffer, ech_offs + 2, ech_sz + inc);
+    SHTONA(buffer, pay_offs, pay_sz + inc);
+    memmove(buffer + ech_end + inc, buffer + ech_end, n - (ech_end + inc));
+    return inc;
+}
+
+static void resize_sni(char *buffer, ssize_t n, ssize_t sni_offs,
+        ssize_t sni_sz, ssize_t new_sz) {
+    SHTONA(buffer, sni_offs + 2, new_sz + 5);
+    SHTONA(buffer, sni_offs + 4, new_sz + 3);
+    SHTONA(buffer, sni_offs + 7, new_sz);
+    ssize_t sni_end = sni_offs + 4 + sni_sz;
+    memmove(buffer + sni_end + new_sz - (sni_sz - 5),
+            buffer + sni_end, n - sni_end);
+}
+
+int change_tls_sni(const char *host, char *buffer, ssize_t n, ssize_t nn) {
+    int avail = merge_tls_records(buffer, n);
+    avail += (nn - n);
+    uint16_t r_sz = ANTOHS(buffer, 3);
+    r_sz += avail;
+    size_t skip = find_ext_block(buffer, n);
+    if (!skip) { return -1; }
+    ssize_t sni_offs = find_tls_ext_offset(0x00, buffer, n, skip);
+    if (!sni_offs) { return -1; }
+    uint16_t new_sz = strlen(host);
+    uint16_t sni_sz = ANTOHS(buffer, sni_offs + 2);
+    if (sni_offs + 4 + sni_sz > n) { return -1; }
+    int diff = (int)new_sz - (sni_sz - 5);
+    avail -= diff;
+    if (diff < 0 && avail > 0) {
+        resize_sni(buffer, n, sni_offs, sni_sz, new_sz);
+        diff = 0;
+    }
+    if (avail) { avail -= resize_ech_ext(buffer, n, skip, avail); }
+    if (avail < -50) { avail += remove_ks_group(buffer, n, skip, 0x11ec); }
+    static const uint16_t exts[] = {
+        0x0015, 0x0031, 0x0010, 0x001c, 0x0023,
+        0x0005, 0x0022, 0x0012, 0x001b, 0
+    };
+    for (const uint16_t *e = exts; avail && avail < 4; e++) {
+        if (!*e) { return -1; }
+        avail += remove_tls_ext(buffer, n, skip, *e);
+    }
+    if (!(sni_offs = find_tls_ext_offset(0x00, buffer, n, skip))) { return -1; }
+    if (diff) { resize_sni(buffer, n, sni_offs, sni_sz, new_sz); }
+    copy_name(buffer + sni_offs + 9, host, new_sz);
+    if (avail > 0) { avail -= resize_ech_ext(buffer, n, skip, avail); }
+    if (avail >= 4) {
+        SHTONA(buffer, 5 + r_sz - avail, 0x0015);
+        SHTONA(buffer, 5 + r_sz - avail + 2, avail - 4);
+        memset(buffer + 5 + r_sz - avail + 4, 0, avail - 4);
+    }
+    SHTONA(buffer, 3, r_sz);
+    SHTONA(buffer, 7, r_sz - 4);
+    SHTONA(buffer, skip, 5 + r_sz - skip - 2);
+    return 0;
+}
+
 bool is_tls_chello(const char *buffer, size_t bsize) {
     return (bsize > 5 && ANTOHS(buffer, 0) == 0x1603 && buffer[5] == 0x01);
 }
@@ -82,16 +240,14 @@ bool is_http(const char *buffer, size_t bsize) {
 
 int parse_tls(const char *buffer, size_t bsize, char **hs) {
     if (!is_tls_chello(buffer, bsize)) { return 0; }
-    if (bsize < 44) { return 0; }
-    uint8_t sid_len = buffer[43];
-    size_t skip = 44 + sid_len + 2;
-    if (bsize < skip + 4) { return 0; }
-    /* simplified SNI extraction */
-    uint16_t ext_block_len = ANTOHS(buffer, skip - 2 + (44 + sid_len) - (44 + sid_len));
-    (void)ext_block_len;
-    /* just return 0 for minimal stub — real impl in desync.c tree */
-    (void)hs;
-    return 0;
+    size_t skip = find_ext_block(buffer, bsize);
+    if (!skip) { return 0; }
+    size_t sni_offs = find_tls_ext_offset(0x00, buffer, bsize, skip);
+    if (!sni_offs || (sni_offs + 12) >= bsize) { return 0; }
+    uint16_t len = ANTOHS(buffer, sni_offs + 7);
+    if ((sni_offs + 9 + len) > bsize) { return 0; }
+    *hs = (char *)&buffer[sni_offs + 9];
+    return len;
 }
 
 int parse_http(const char *buffer, size_t bsize, char **hs, uint16_t *port) {
@@ -102,9 +258,9 @@ int parse_http(const char *buffer, size_t bsize, char **hs, uint16_t *port) {
     host += 6;
     for (; host < buff_end && *host == ' '; host++);
     if (!(l_end = memchr(host, '\n', buff_end - host))) { return 0; }
-    for (; isspace((unsigned char) *(l_end - 1)); l_end--);
+    for (; isspace((unsigned char)*(l_end - 1)); l_end--);
     const char *h_end = l_end - 1;
-    while (isdigit((unsigned char) *--h_end));
+    while (isdigit((unsigned char)*--h_end));
     if (*h_end != ':') {
         if (port) *port = 80;
         h_end = l_end;
@@ -122,6 +278,51 @@ int parse_http(const char *buffer, size_t bsize, char **hs, uint16_t *port) {
     return h_end - host;
 }
 
+static int get_http_code(const char *b, size_t n) {
+    if (n < 13 || strncmp(b, "HTTP/1.", 7)) { return 0; }
+    if (!memchr(b + 12, '\n', n - 12)) { return 0; }
+    char *e;
+    long num = strtol(b + 9, &e, 10);
+    if (num < 100 || num > 511 || !isspace((unsigned char)*e)) { return 0; }
+    return (int)num;
+}
+
+bool is_http_redirect(const char *req, size_t qn,
+        const char *resp, size_t sn) {
+    char *host = 0, *location;
+    int len = parse_http(req, qn, &host, 0);
+    if (len <= 0 || sn < 29) { return 0; }
+    int code = get_http_code(resp, sn);
+    if (code > 308 || code < 300) { return 0; }
+    if (!(location = strncasestr(resp, sn, "\nLocation:", 10)) ||
+            ((location += 11) + 8) >= (resp + sn)) { return 0; }
+    char *l_end = memchr(location, '\n', sn - (location - resp));
+    if (!l_end) { return 0; }
+    for (; isspace((unsigned char)*(l_end - 1)); l_end--);
+    if ((l_end - location) > 7) {
+        if (!strncmp(location, "http://", 7)) location += 7;
+        else if (!strncmp(location, "https://", 8)) location += 8;
+    }
+    char *le = memchr(location, '/', l_end - location);
+    if (!le) le = l_end;
+    char *he = host + len, *h = he;
+    while (h != host && *(--h - 1) != '.');
+    while (h != host && *(--h - 1) != '.');
+    return ((le - location) < (he - h)) ||
+           memcmp(le - (he - h), h, he - h) != 0;
+}
+
+bool neq_tls_sid(const char *req, size_t qn,
+        const char *resp, size_t sn) {
+    if (qn < 75 || sn < 75) { return 0; }
+    if (!is_tls_chello(req, qn) || ANTOHS(resp, 0) != 0x1603) { return 0; }
+    uint8_t sid_len = req[43];
+    size_t skip = 44 + sid_len + 3;
+    if (!find_tls_ext_offset(0x2b, resp, sn, skip)) { return 0; }
+    if (req[43] != resp[43]) { return 1; }
+    return memcmp(req + 44, resp + 44, sid_len);
+}
+
 int mod_http(char *buffer, size_t bsize, int m) {
     char *host = 0, *par;
     int hlen = parse_http(buffer, bsize, &host, 0);
@@ -129,9 +330,9 @@ int mod_http(char *buffer, size_t bsize, int m) {
     for (par = host - 1; *par != ':'; par--) {}
     par -= 4;
     if (m & MH_HMIX) {
-        par[0] = tolower((unsigned char) par[0]);
-        par[1] = toupper((unsigned char) par[1]);
-        par[3] = toupper((unsigned char) par[3]);
+        par[0] = tolower((unsigned char)par[0]);
+        par[1] = toupper((unsigned char)par[1]);
+        par[3] = toupper((unsigned char)par[3]);
     }
     if (m & MH_DMIX) {
         for (int i = 0; i < hlen; i += 2) {
@@ -139,7 +340,7 @@ int mod_http(char *buffer, size_t bsize, int m) {
         }
     }
     if (m & MH_SPACE) {
-        for (; !isspace((unsigned char) *(host + hlen)); hlen++) {}
+        for (; !isspace((unsigned char)*(host + hlen)); hlen++) {}
         int sc = host - (par + 5);
         memmove(par + 5, host, hlen);
         memset(par + 5 + hlen, '\t', sc);
@@ -158,28 +359,80 @@ int part_tls(char *buffer, size_t bsize, ssize_t n, long pos) {
     return 5;
 }
 
+static void gen_rand_array(char *out, size_t len) {
+    for (; len; len--, out++) {
+        uint8_t c = rand() % 256;
+        *((uint8_t *)out) = c;
+    }
+}
+
 void randomize_tls(char *buffer, ssize_t n) {
     if (n < 44) { return; }
     uint8_t sid_len = buffer[43];
     if (n < (44l + sid_len + 2)) { return; }
-    for (int i = 0; i < 32; i++) buffer[11 + i] = rand() % 256;
-    for (int i = 0; i < sid_len; i++) buffer[44 + i] = rand() % 256;
+    gen_rand_array(buffer + 11, 32);
+    gen_rand_array(buffer + 44, sid_len);
+    size_t skip = find_ext_block(buffer, n);
+    if (!skip) { return; }
+    ssize_t ks_offs = find_tls_ext_offset(0x0033, buffer, n, skip);
+    if (!ks_offs || ks_offs + 6 >= n) { return; }
+    int ks_sz = ANTOHS(buffer, ks_offs + 2);
+    if (ks_offs + 4 + ks_sz > n) { return; }
+    ssize_t g_offs = ks_offs + 4 + 2;
+    while (g_offs + 4 < ks_offs + 4 + ks_sz) {
+        uint16_t g_sz = ANTOHS(buffer, g_offs + 2);
+        if (ks_offs + 4 + g_sz > n) { return; }
+        gen_rand_array(buffer + g_offs + 4, g_sz);
+        g_offs += 4 + g_sz;
+    }
 }
 
-bool is_http_redirect(const char *req, size_t qn, const char *resp, size_t sn) {
-    (void)req; (void)qn; (void)resp; (void)sn;
-    return false;
+uint16_t ip_checksum(const void *data, size_t len) {
+    const uint16_t *p = (const uint16_t *)data;
+    uint32_t sum = 0;
+    for (; len > 1; len -= 2) sum += *p++;
+    if (len) sum += *(const uint8_t *)p;
+    while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+    return ~(uint16_t)sum;
 }
 
-bool neq_tls_sid(const char *req, size_t qn, const char *resp, size_t sn) {
-    if (qn < 75 || sn < 75) { return 0; }
-    if (!is_tls_chello(req, qn) || ANTOHS(resp, 0) != 0x1603) { return 0; }
-    uint8_t sid_len = req[43];
-    if (req[43] != resp[43]) { return 1; }
-    return memcmp(req + 44, resp + 44, sid_len);
+uint16_t tcp_checksum(const void *pseudo,
+        const void *data, size_t len) {
+    uint32_t sum = 0;
+    const uint16_t *p = (const uint16_t *)pseudo;
+    for (size_t i = 0; i < 6; i++) sum += *p++;
+    p = (const uint16_t *)data;
+    for (; len > 1; len -= 2) sum += *p++;
+    if (len) sum += *(const uint8_t *)p;
+    while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+    return ~(uint16_t)sum;
 }
 
-int change_tls_sni(const char *host, char *buffer, ssize_t n, ssize_t nn) {
-    (void)host; (void)buffer; (void)n; (void)nn;
-    return -1;
+int fake_tls_init(struct packet *pkt, size_t len) {
+    pkt->data = malloc(len < sizeof(tls_data) ? sizeof(tls_data) : len);
+    if (!pkt->data) return -1;
+    memcpy(pkt->data, tls_data, sizeof(tls_data));
+    pkt->size = sizeof(tls_data);
+    pkt->off  = 0;
+    return 0;
+}
+
+int fake_http_init(struct packet *pkt) {
+    pkt->data = malloc(sizeof(http_data));
+    if (!pkt->data) return -1;
+    memcpy(pkt->data, http_data, sizeof(http_data));
+    pkt->size = sizeof(http_data);
+    pkt->off  = 0;
+    return 0;
+}
+
+int fake_udp_init(struct packet *pkt, size_t len) {
+    size_t sz = len ? len : sizeof(udp_data);
+    pkt->data = calloc(1, sz);
+    if (!pkt->data) return -1;
+    memcpy(pkt->data, udp_data,
+           sz < sizeof(udp_data) ? sz : sizeof(udp_data));
+    pkt->size = sz;
+    pkt->off  = 0;
+    return 0;
 }

@@ -7,17 +7,14 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-/* vendored byedpi sources */
 #include "byedpi/proxy.h"
 #include "byedpi/params.h"
-#include "byedpi/desync.h"
 #include "byedpi/packets.h"
 
 #define LOG_TAG "ciadpi_jni"
 #define LOGI(...)  __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...)  __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-/* ── byedpi global state (defined in proxy.c / packets.c) ── */
 struct params  params;
 struct packet  fake_tls;
 struct packet  fake_http;
@@ -37,9 +34,8 @@ typedef struct {
 
 static JniConfig g_cfg;
 
-/* ── Initialise params to safe defaults ── */
 static void init_params(const JniConfig *cfg) {
-    memset(&params, 0, sizeof(params));
+    memset(&params,    0, sizeof(params));
     memset(&fake_tls,  0, sizeof(fake_tls));
     memset(&fake_http, 0, sizeof(fake_http));
     memset(&fake_udp,  0, sizeof(fake_udp));
@@ -52,33 +48,36 @@ static void init_params(const JniConfig *cfg) {
     params.bfsize    = 16384;
     params.debug     = 0;
 
-    /* bind address: 0.0.0.0 (any) */
-    params.baddr.in.sin_family = AF_INET;
+    params.baddr.in.sin_family      = AF_INET;
     params.baddr.in.sin_addr.s_addr = INADDR_ANY;
-    params.baddr.in.sin_port = 0;
+    params.baddr.in.sin_port        = 0;
 
-    /* Allocate one desync_params block */
     params.dp = (struct desync_params *)calloc(1, sizeof(struct desync_params));
     if (!params.dp) { LOGE("OOM: desync_params"); return; }
     params.dp_n = 1;
+    params.dp_full_mask = 1;
+    params.dp->bit = 1;
 
     struct desync_params *dp = params.dp;
-    dp->id = 0;
 
     if (cfg->split_pos > 0) {
         dp->parts = (struct part *)calloc(1, sizeof(struct part));
         if (dp->parts) {
             dp->parts[0].pos = cfg->split_pos;
-            dp->parts[0].m   = cfg->disorder ? DESYNC_DISORDER : DESYNC_SPLIT;
-            dp->parts_n = 1;
+            dp->parts[0].m   = cfg->disorder
+                                ? DESYNC_DISORDER : DESYNC_SPLIT;
+            dp->parts[0].r   = 1;
+            dp->parts_n      = 1;
         }
     }
 
     if (cfg->fake_enabled) {
         dp->ttl       = cfg->fake_ttl > 0 ? cfg->fake_ttl : 6;
         dp->drop_sack = (bool)cfg->drop_sack;
-        fake_tls_init(&fake_tls, 1024);
-        fake_http_init(&fake_http);
+        if (fake_tls_init(&fake_tls, 1024) < 0)
+            LOGE("fake_tls_init failed");
+        if (fake_http_init(&fake_http) < 0)
+            LOGE("fake_http_init failed");
     }
 }
 
@@ -110,7 +109,6 @@ static void *ciadpi_thread(void *arg) {
     srv.in.sin_port        = htons((uint16_t)cfg->socks_port);
     srv.in.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-    /* Blocks until proxy_stop() / SIGTERM / error */
     int rc = run(&srv);
     LOGI("ciadpi run() returned %d", rc);
 
@@ -118,8 +116,6 @@ static void *ciadpi_thread(void *arg) {
     g_running = 0;
     return NULL;
 }
-
-/* ═══════════════════════  JNI exports  ═══════════════════════ */
 
 JNIEXPORT jint JNICALL
 Java_com_makskbz_myvpnproject_vpn_ProxyEngine_ciadpiStart(
@@ -133,6 +129,7 @@ Java_com_makskbz_myvpnproject_vpn_ProxyEngine_ciadpiStart(
         jboolean dropSack,
         jstring  autoMode)
 {
+    (void)env; (void)thiz; (void)autoMode;
     if (g_running) { LOGI("ciadpi already running"); return 0; }
 
     g_cfg.socks_port   = (int)socksPort;
@@ -157,8 +154,8 @@ Java_com_makskbz_myvpnproject_vpn_ProxyEngine_ciadpiStop(
         JNIEnv *env,
         jobject thiz)
 {
+    (void)env; (void)thiz;
     if (!g_running) return;
-    /* Signal event loop to exit by shutting down the server socket */
     extern int server_fd;
     if (server_fd > 0) shutdown(server_fd, SHUT_RDWR);
     pthread_join(g_thread, NULL);
@@ -171,5 +168,6 @@ Java_com_makskbz_myvpnproject_vpn_ProxyEngine_ciadpiVersion(
         JNIEnv *env,
         jobject thiz)
 {
-    return (*env)->NewStringUTF(env, "byedpi/vendored ba53229");
+    (void)thiz;
+    return (*env)->NewStringUTF(env, "byedpi/vendored");
 }
