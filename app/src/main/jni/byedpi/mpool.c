@@ -1,9 +1,11 @@
+/* vendored from https://github.com/hufrea/byedpi — MIT License */
 #include "mpool.h"
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stddef.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 static int bit_cmp(const struct elem *p, const struct elem *q) {
     int len = q->len < p->len ? q->len : p->len;
@@ -12,7 +14,7 @@ static int bit_cmp(const struct elem *p, const struct elem *q) {
     if (cmp || !df) { return cmp; }
     uint8_t c1 = p->data[bytes] >> (8 - df);
     uint8_t c2 = q->data[bytes] >> (8 - df);
-    if (c1 != c2) { if (c1 < c2) return -1; else return 1; }
+    if (c1 != c2) { return c1 < c2 ? -1 : 1; }
     return 0;
 }
 
@@ -27,9 +29,7 @@ static int host_cmp(const struct elem *p, const struct elem *q) {
     while (len-- > 0) {
         if (*--pd != *--qd) { return *pd < *qd ? -1 : 1; }
     }
-    if (p->len == q->len ||
-            (p->len > q->len ? pd[-1] : qd[-1]) == '.')
-        return 0;
+    if (p->len == q->len || (p->len > q->len ? pd[-1] : qd[-1]) == '.') return 0;
     return p->len > q->len ? 1 : -1;
 }
 
@@ -94,9 +94,62 @@ void mem_destroy(struct mphdr *hdr) {
 }
 
 void dump_cache(struct mphdr *hdr, FILE *out, struct desync_params *dp) {
-    (void)hdr; (void)out; (void)dp;
+    if (!hdr->root) { return; }
+    kavl_itr_t(my) itr;
+    kavl_itr_first(my, hdr->root, &itr);
+    do {
+        struct elem_i *p = (struct elem_i *)kavl_at(&itr);
+        struct cache_key *key = (struct cache_key *)p->main.data;
+        if (p->dp != dp) { continue; }
+        char ADDR_STR[INET6_ADDRSTRLEN];
+        if (key->family == AF_INET)
+            inet_ntop(AF_INET,  &key->ip.v4, ADDR_STR, sizeof(ADDR_STR));
+        else
+            inet_ntop(AF_INET6, &key->ip.v6, ADDR_STR, sizeof(ADDR_STR));
+        int bitlen = p->main.len - offsetof(struct cache_key, ip.v4) * 8;
+        fprintf(out, "0 %s %d %d %jd %.*s\n",
+            ADDR_STR, bitlen, ntohs(key->port),
+            (intmax_t)p->time,
+            p->extra_len ? p->extra_len : 1,
+            p->extra ? p->extra : "-");
+    } while (kavl_itr_next(my, &itr));
+    fflush(out);
 }
 
 void load_cache(struct mphdr *hdr, FILE *in, struct desync_params *dp) {
-    (void)hdr; (void)in; (void)dp;
+    for (;;) {
+        char addr_str[INET6_ADDRSTRLEN] = { 0 };
+        char host[256] = { 0 };
+        int bitlen;
+        uint16_t port;
+        time_t cache_time;
+        int c = fscanf(in, "0 %39s %d %hu %jd %255s\n",
+                       addr_str, &bitlen, &port, &cache_time, host);
+        if (c < 1) { return; }
+        struct cache_key key = { 0 };
+        int key_size = offsetof(struct cache_key, ip.v4);
+        bitlen += key_size * 8;
+        if (inet_pton(AF_INET, addr_str, &key.ip.v4) <= 0) {
+            if (inet_pton(AF_INET6, addr_str, &key.ip.v6) <= 0) { continue; }
+            key.family = AF_INET6;
+            key_size  += sizeof(key.ip.v6);
+        } else {
+            key.family = AF_INET;
+            key_size  += sizeof(key.ip.v4);
+        }
+        if (key_size * 8 < bitlen) { continue; }
+        key.port = htons(port);
+        struct cache_key *data = calloc(1, key_size);
+        if (!data) { return; }
+        memcpy(data, &key, key_size);
+        struct elem_i *e = mem_add(hdr, (char *)data, bitlen, sizeof(struct elem_i));
+        if (!e) { free(data); return; }
+        e->time      = cache_time;
+        e->extra_len = strlen(host);
+        e->dp        = dp;
+        if (e->extra_len > 1) {
+            e->extra = malloc(e->extra_len + 1);
+            memcpy(e->extra, host, e->extra_len + 1);
+        }
+    }
 }

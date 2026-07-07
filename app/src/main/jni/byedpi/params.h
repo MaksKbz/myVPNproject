@@ -34,6 +34,12 @@
 #define OUT_SUPPORT (MODE_SOCKS5 | MODE_TCP)
 #define FM_RAND 1
 #define FM_ORIG 2
+#ifdef STR_MODE
+static const char *demode_str[] = {
+    "none", "split", "disorder",
+    "oob", "disoob", "fake"
+};
+#endif
 enum demode {
     DESYNC_NONE, DESYNC_SPLIT, DESYNC_DISORDER,
     DESYNC_OOB, DESYNC_DISOOB, DESYNC_FAKE

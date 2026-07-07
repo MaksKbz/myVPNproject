@@ -3,6 +3,7 @@
 #define CONEV_H
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include "params.h"
 #ifndef __linux__
 #define NOEPOLL
@@ -13,10 +14,10 @@
 #include <netinet/tcp.h>
 #ifndef NOEPOLL
 #include <sys/epoll.h>
-#define POLLIN  EPOLLIN
-#define POLLOUT EPOLLOUT
-#define POLLERR EPOLLERR
-#define POLLHUP EPOLLHUP
+#define POLLIN    EPOLLIN
+#define POLLOUT   EPOLLOUT
+#define POLLERR   EPOLLERR
+#define POLLHUP   EPOLLHUP
 #define POLLRDHUP EPOLLRDHUP
 #else
 #include <poll.h>
@@ -34,9 +35,9 @@ typedef int (*evcb_t)(struct poolhd *, struct eval *, int);
 #define FLAG_CONN 4
 #define FLAG_HTTP 8
 struct buffer {
-    size_t size;
+    size_t       size;
     unsigned int offset;
-    ssize_t lock;
+    ssize_t      lock;
     struct buffer *next;
     char data[];
 };
@@ -91,19 +92,19 @@ struct poolhd {
     struct buffer *root_buff;
     int buff_count;
 };
-struct poolhd *init_pool(int count);
-struct eval   *add_event(struct poolhd *pool, evcb_t cb, int fd, int e);
-struct eval   *add_pair(struct poolhd *pool, struct eval *val, int sfd, int e);
-void           del_event(struct poolhd *pool, struct eval *val);
-void           destroy_pool(struct poolhd *pool);
-struct eval   *next_event(struct poolhd *pool, int *offs, int *type, int ms);
-int            mod_etype(struct poolhd *pool, struct eval *val, int type);
-void           set_timer(struct poolhd *pool, struct eval *val, long ms);
-void           remove_timer(struct poolhd *pool, struct eval *val);
-void           loop_event(struct poolhd *pool);
-struct buffer *buff_pop(struct poolhd *pool, size_t size);
-void           buff_push(struct poolhd *pool, struct buffer *buff);
-void           buff_destroy(struct buffer *root);
+struct poolhd  *init_pool(int count);
+struct eval    *add_event(struct poolhd *pool, evcb_t cb, int fd, int e);
+struct eval    *add_pair(struct poolhd *pool, struct eval *val, int sfd, int e);
+void            del_event(struct poolhd *pool, struct eval *val);
+void            destroy_pool(struct poolhd *pool);
+struct eval    *next_event(struct poolhd *pool, int *offs, int *type, int ms);
+int             mod_etype(struct poolhd *pool, struct eval *val, int type);
+void            set_timer(struct poolhd *pool, struct eval *val, long ms);
+void            remove_timer(struct poolhd *pool, struct eval *val);
+void            loop_event(struct poolhd *pool);
+struct buffer  *buff_pop(struct poolhd *pool, size_t size);
+void            buff_push(struct poolhd *pool, struct buffer *buff);
+void            buff_destroy(struct buffer *root);
 static inline struct buffer *buff_ppop(struct poolhd *pool, size_t size) {
     struct buffer *b = buff_pop(pool, size);
     if (b) buff_push(pool, b);
