@@ -417,7 +417,7 @@ ssize_t desync(struct poolhd *pool, struct eval *val,
             break;
         }
         if (pos > n) {
-            LOG(LOG_E, "pos reduced: %ld -> %ld\n", pos, n);
+            LOG(LOG_E, "pos reduced: %ld -> %zd\n", pos, n);
             pos = n;
         }
         ssize_t s = 0;
