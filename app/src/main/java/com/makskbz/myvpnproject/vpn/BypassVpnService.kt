@@ -71,9 +71,9 @@ class BypassVpnService : VpnService(), Runnable {
     private fun runVpn(allowedApps: ArrayList<String>?) {
         try {
             // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ АРХИТЕКТУРЫ (Fallback на PacketProcessor):
-            // Так как нативная библиотека tun2socks_jni.c на данном этапе разработки является 
+            // Так как нативная библиотека tun2socks_jni.c на данном этапе разработки является
             // no-op заглушкой, весь входящий трафик уходил в черную дыру, блокируя интернет.
-            // Мы полностью переключаем службу на работу через проверенный и 100% рабочий 
+            // Мы полностью переключаем службу на работу через проверенный и 100% рабочий
             // Userspace-цикл на Kotlin, вызывающий PacketProcessor.processPacket().
             // Это гарантирует стабильную фрагментацию TCP и блокировку QUIC прямо сейчас!
 
@@ -121,15 +121,14 @@ class BypassVpnService : VpnService(), Runnable {
                     buffer.limit(length)
                     buffer.rewind()
 
-                    // Безопасно обрабатываем пакеты через PacketProcessor
+                    // Корректный вызов PacketProcessor: передаём ByteArray, длину и OutputStream
                     executorService?.submit {
                         try {
-                            val processedLength = PacketProcessor.processPacket(buffer, length)
-                            if (processedLength > 0) {
-                                synchronized(output) {
-                                    output.write(buffer.array(), 0, processedLength)
-                                }
-                            }
+                            PacketProcessor.processPacket(
+                                buffer.array(),
+                                length,
+                                output
+                            )
                         } catch (e: Exception) {
                             Log.e(TAG, "Error in packet loop", e)
                         }
