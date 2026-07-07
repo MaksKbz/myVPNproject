@@ -5,14 +5,14 @@ plugins {
 
 android {
     namespace = "com.makskbz.myvpnproject"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.makskbz.myvpnproject"
         minSdk = 24
-        targetSdk = 34
-        versionCode = 13
-        versionName = "3.1.1" // Версия 3.1.1 — Полная стабилизация
+        targetSdk = 35
+        versionCode = 14
+        versionName = "3.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
     }

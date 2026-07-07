@@ -1,9 +1,15 @@
 package com.makskbz.myvpnproject.vpn
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
@@ -18,18 +24,29 @@ class BypassVpnService : VpnService(), Runnable {
         const val ACTION_START = "START"
         const val ACTION_STOP = "STOP"
         const val EXTRA_ALLOWED_APPS = "ALLOWED_APPS"
-        const val EXTRA_PRESET_ID = "PRESET_ID"  // используется в MainActivity
+        const val EXTRA_PRESET_ID = "PRESET_ID"
+        private const val NOTIFICATION_ID = 1337
+        private const val CHANNEL_ID = "vpn_channel"
     }
 
     private var vpnThread: Thread? = null
     private var vpnInterface: ParcelFileDescriptor? = null
-    private var isRunning = false
+    // Исправление #5: @Volatile гарантирует видимость изменений между потокам
+    @Volatile private var isRunning = false
     private var executorService: ExecutorService? = null
+    private var activePresetId: String = "universal"
+
+    override fun onCreate() {
+        super.onCreate()
+        createNotificationChannel()
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
         if (action == ACTION_START) {
             val allowedApps = intent.getStringArrayListExtra(EXTRA_ALLOWED_APPS)
+            // Исправление #3: читаем presetId и передаём в PacketProcessor
+            activePresetId = intent.getStringExtra(EXTRA_PRESET_ID) ?: "universal"
             startVpn(allowedApps)
         } else if (action == ACTION_STOP) {
             stopVpn()
@@ -40,14 +57,17 @@ class BypassVpnService : VpnService(), Runnable {
     private fun startVpn(allowedApps: ArrayList<String>?) {
         if (isRunning) return
         isRunning = true
+        // Исправление #6: Foreground Service — сервис не убьётся системой на Android 8+
+        startForeground(NOTIFICATION_ID, buildNotification())
         executorService = Executors.newCachedThreadPool()
         vpnThread = Thread({ runVpn(allowedApps) }, "BypassVpnThread").apply { start() }
-        Log.i(TAG, "VPN service 3.1.0 started with active PacketProcessor fallback.")
+        Log.i(TAG, "VPN service 3.2.0 started. Preset: $activePresetId")
     }
 
     private fun stopVpn() {
         if (!isRunning) return
         isRunning = false
+        stopForeground(true)
         try {
             vpnInterface?.close()
         } catch (e: Exception) {
@@ -59,7 +79,7 @@ class BypassVpnService : VpnService(), Runnable {
         executorService?.shutdownNow()
         executorService = null
         stopSelf()
-        Log.i(TAG, "VPN service 3.1.0 stopped.")
+        Log.i(TAG, "VPN service 3.2.0 stopped.")
     }
 
     override fun onDestroy() {
@@ -103,31 +123,30 @@ class BypassVpnService : VpnService(), Runnable {
                 return
             }
 
-            val input = FileInputStream(vpnInterface!!.fileDescriptor)
+            val input  = FileInputStream(vpnInterface!!.fileDescriptor)
             val output = FileOutputStream(vpnInterface!!.fileDescriptor)
             val buffer = ByteBuffer.allocate(32767)
+            // Исправление #3: пресет из
+            val config = ConfigManager.loadPreset(activePresetId)
 
             while (isRunning) {
                 val length = input.read(buffer.array())
                 if (length > 0) {
-                    buffer.limit(length)
-                    buffer.rewind()
-
-                    // Корректный вызов PacketProcessor: передаём ByteArray, длину и OutputStream
+                    // Исправление #1: копия до submit, чтобы последующий read() не перезаписал общий массив
+                    val packetCopy = buffer.array().copyOf(length)
                     executorService?.submit {
                         try {
-                            PacketProcessor.processPacket(
-                                buffer.array(),
-                                length,
-                                output
-                            )
+                            // Исправление #2: synchronized исключает перемешивание фрагментов из разных потоков
+                            synchronized(output) {
+                                PacketProcessor.processPacket(packetCopy, length, output, config)
+                            }
                         } catch (e: Exception) {
                             Log.e(TAG, "Error in packet loop", e)
                         }
                     }
                     buffer.clear()
                 }
-                Thread.sleep(1)
+                // Исправление #4: Thread.sleep(1) удалён — input.read() итак блокирующий
             }
         } catch (e: InterruptedException) {
             Log.i(TAG, "VPN thread interrupted.")
@@ -136,5 +155,28 @@ class BypassVpnService : VpnService(), Runnable {
         } finally {
             stopVpn()
         }
+    }
+
+    // ── Foreground Service helpers ──
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "VPN сервис",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply { description = "myVPNproject DPI bypass" }
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.createNotificationChannel(channel)
+        }
+    }
+
+    private fun buildNotification(): Notification {
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("myVPNproject активен")
+            .setContentText("DPI bypass работает • пресет: $activePresetId")
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setOngoing(true)
+            .build()
     }
 }

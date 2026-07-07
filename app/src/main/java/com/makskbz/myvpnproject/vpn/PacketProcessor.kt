@@ -2,7 +2,6 @@ package com.makskbz.myvpnproject.vpn
 
 import android.util.Log
 import java.io.OutputStream
-import java.nio.ByteBuffer
 
 object PacketProcessor {
 
@@ -10,14 +9,13 @@ object PacketProcessor {
 
     /**
      * Обрабатывает сырые IP-пакеты и записывает результат в output.
-     * Возвращает true, если пакет был обработан (или отброшен), false — если нужно записать оригинал.
      *
-     * Ключевые исправления v2.0:
-     * - Реализована настоящая фрагментация TLS ClientHello (два отдельных TCP-сегмента)
-     * - Исправлен парсинг TLS: проверяется версия, длина записи и тип handshake
-     * - QUIC-блокировка оставлена как есть (дроп UDP/443)
+     * v3.0 — исправления:
+     * - Принимает BypassConfig для пресет-зависимой обработки
+     * - Рандомизированная точка сплита TLS ClientHello (1–5 байт)
+     * - Вызывается уже с копией пакета (без race condition)
      */
-    fun processPacket(packetBytes: ByteArray, length: Int, output: OutputStream): Boolean {
+    fun processPacket(packetBytes: ByteArray, length: Int, output: OutputStream, config: BypassConfig = BypassConfig()): Boolean {
         if (length < 20) {
             output.write(packetBytes, 0, length)
             return true
@@ -25,7 +23,6 @@ object PacketProcessor {
 
         val ipVersion = (packetBytes[0].toInt() shr 4) and 0x0F
         if (ipVersion != 4) {
-            // IPv6 — пропускаем без изменений
             output.write(packetBytes, 0, length)
             return true
         }
@@ -36,7 +33,7 @@ object PacketProcessor {
         return try {
             when (protocol) {
                 17 -> handleUdp(packetBytes, length, ipHeaderLen, output)
-                6  -> handleTcp(packetBytes, length, ipHeaderLen, output)
+                6  -> handleTcp(packetBytes, length, ipHeaderLen, output, config)
                 else -> {
                     output.write(packetBytes, 0, length)
                     true
@@ -53,7 +50,6 @@ object PacketProcessor {
         val dPort = ((pkt[ipHdrLen + 2].toInt() and 0xFF) shl 8) or
                     (pkt[ipHdrLen + 3].toInt() and 0xFF)
         return if (dPort == 443) {
-            // Блокируем QUIC/HTTP3 — дроп пакета, возвращаем true (обработано)
             Log.d(TAG, "QUIC/UDP 443 dropped — forcing TCP/TLS fallback")
             true
         } else {
@@ -62,7 +58,13 @@ object PacketProcessor {
         }
     }
 
-    private fun handleTcp(pkt: ByteArray, length: Int, ipHdrLen: Int, output: OutputStream): Boolean {
+    private fun handleTcp(
+        pkt: ByteArray,
+        length: Int,
+        ipHdrLen: Int,
+        output: OutputStream,
+        config: BypassConfig
+    ): Boolean {
         val dPort = ((pkt[ipHdrLen + 2].toInt() and 0xFF) shl 8) or
                     (pkt[ipHdrLen + 3].toInt() and 0xFF)
 
@@ -75,18 +77,17 @@ object PacketProcessor {
         val payloadOffset = ipHdrLen + tcpHdrLen
         val payloadLen = length - payloadOffset
 
-        // Минимальная длина TLS record header = 5 байт + 4 байта handshake header = 9 байт
         if (payloadLen < 9) {
             output.write(pkt, 0, length)
             return true
         }
 
-        val contentType  = pkt[payloadOffset].toInt() and 0xFF       // 0x16 = TLS Handshake
-        val tlsVerMajor  = pkt[payloadOffset + 1].toInt() and 0xFF   // 0x03
-        val tlsVerMinor  = pkt[payloadOffset + 2].toInt() and 0xFF   // 0x01–0x04
-        val recordLen    = ((pkt[payloadOffset + 3].toInt() and 0xFF) shl 8) or
-                           (pkt[payloadOffset + 4].toInt() and 0xFF)
-        val handshakeType = pkt[payloadOffset + 5].toInt() and 0xFF  // 0x01 = ClientHello
+        val contentType   = pkt[payloadOffset].toInt() and 0xFF
+        val tlsVerMajor   = pkt[payloadOffset + 1].toInt() and 0xFF
+        val tlsVerMinor   = pkt[payloadOffset + 2].toInt() and 0xFF
+        val recordLen     = ((pkt[payloadOffset + 3].toInt() and 0xFF) shl 8) or
+                            (pkt[payloadOffset + 4].toInt() and 0xFF)
+        val handshakeType = pkt[payloadOffset + 5].toInt() and 0xFF
 
         val isTlsHandshake = contentType == 0x16 &&
                              tlsVerMajor == 0x03 &&
@@ -100,15 +101,11 @@ object PacketProcessor {
             return true
         }
 
-        Log.i(TAG, "TLS ClientHello detected — applying TCP segment split")
+        Log.i(TAG, "TLS ClientHello detected — preset=${config.presetName}")
 
-        // === РЕАЛЬНАЯ ФРАГМЕНТАЦИЯ ===
-        // Разбиваем payload на два сегмента:
-        //   fragment1: первые 3 байта TLS payload (до тела ClientHello)
-        //   fragment2: остаток
-        // Для каждого фрагмента строим корректный IP+TCP пакет с пересчитанными длинами.
-
-        val frag1PayloadLen = 3
+        // Исправление: рандомизированная точка сплита (1–5 байт)
+        // у разных пресетов можно задать разные диапазоныв будущем
+        val frag1PayloadLen = (1..5).random()
         val frag2PayloadLen = payloadLen - frag1PayloadLen
 
         if (frag2PayloadLen <= 0) {
@@ -124,14 +121,11 @@ object PacketProcessor {
         recalcTcpChecksum(pkt1, ipHdrLen, tcpHdrLen)
         output.write(pkt1, 0, pkt1Len)
 
-        // -- Фрагмент 2: нужно сдвинуть TCP sequence number на frag1PayloadLen --
+        // -- Фрагмент 2: сдвигаем TCP SEQ на длину первого фрагмента --
         val pkt2Len = payloadOffset + frag2PayloadLen
         val pkt2 = ByteArray(pkt2Len)
-        // Копируем заголовки
         System.arraycopy(pkt, 0, pkt2, 0, payloadOffset)
-        // Копируем оставшийся payload
         System.arraycopy(pkt, payloadOffset + frag1PayloadLen, pkt2, payloadOffset, frag2PayloadLen)
-        // Сдвигаем SEQ
         advanceTcpSeq(pkt2, ipHdrLen, frag1PayloadLen)
         setIpTotalLength(pkt2, pkt2Len)
         recalcIpChecksum(pkt2, ipHdrLen)
@@ -174,14 +168,12 @@ object PacketProcessor {
     private fun recalcTcpChecksum(pkt: ByteArray, ipHdrLen: Int, tcpHdrLen: Int) {
         val tcpOffset = ipHdrLen
         val tcpLen = pkt.size - ipHdrLen
-        // Обнуляем поле чексуммы TCP
         pkt[tcpOffset + 16] = 0; pkt[tcpOffset + 17] = 0
-        // Строим псевдозаголовок IPv4
         val pseudo = ByteArray(12 + tcpLen)
-        System.arraycopy(pkt, 12, pseudo, 0, 4)  // src IP
-        System.arraycopy(pkt, 16, pseudo, 4, 4)  // dst IP
+        System.arraycopy(pkt, 12, pseudo, 0, 4)
+        System.arraycopy(pkt, 16, pseudo, 4, 4)
         pseudo[8]  = 0
-        pseudo[9]  = 6  // protocol = TCP
+        pseudo[9]  = 6
         pseudo[10] = ((tcpLen shr 8) and 0xFF).toByte()
         pseudo[11] = (tcpLen and 0xFF).toByte()
         System.arraycopy(pkt, ipHdrLen, pseudo, 12, tcpLen)
