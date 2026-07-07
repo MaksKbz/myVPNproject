@@ -4,8 +4,7 @@
 #include "params.h"
 #include "conev.h"
 
-int  socket_mod(int fd);
-int  protect(int conn_fd, const char *path);
+int     socket_mod(int fd);
 
 ssize_t tcp_send_hook(struct poolhd *pool, struct eval *val,
                       struct buffer *buff, ssize_t *n, bool *wait);
