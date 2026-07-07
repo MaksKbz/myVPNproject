@@ -7,6 +7,14 @@ object PacketProcessor {
 
     private const val TAG = "PacketProcessor"
 
+    // === v3.5 CIS statistics ===
+    @Volatile private var packetsTotal = 0L
+    @Volatile private var packetsSplit = 0L
+    @Volatile private var packetsDropped = 0L
+    @Volatile private var packetsIpv6 = 0L
+
+    fun getStats(): String = "total=$packetsTotal split=$packetsSplit dropped=$packetsDropped ipv6=$packetsIpv6"
+
     /**
      * Обрабатывает сырые IP-пакеты и записывает результат в output.
      *
@@ -16,46 +24,72 @@ object PacketProcessor {
      * - Вызывается уже с копией пакета (без race condition)
      */
     fun processPacket(packetBytes: ByteArray, length: Int, output: OutputStream, config: BypassConfig = BypassConfig()): Boolean {
+        packetsTotal++
         if (length < 20) {
             output.write(packetBytes, 0, length)
             return true
         }
 
         val ipVersion = (packetBytes[0].toInt() shr 4) and 0x0F
-        if (ipVersion != 4) {
-            output.write(packetBytes, 0, length)
-            return true
-        }
-
-        val ipHeaderLen = (packetBytes[0].toInt() and 0x0F) * 4
-        val protocol = packetBytes[9].toInt() and 0xFF
-
         return try {
-            when (protocol) {
-                17 -> handleUdp(packetBytes, length, ipHeaderLen, output)
-                6  -> handleTcp(packetBytes, length, ipHeaderLen, output, config)
-                else -> {
-                    output.write(packetBytes, 0, length)
-                    true
+            when (ipVersion) {
+                4 -> {
+                    val ipHeaderLen = (packetBytes[0].toInt() and 0x0F) * 4
+                    val protocol = packetBytes[9].toInt() and 0xFF
+                    when (protocol) {
+                        17 -> handleUdp(packetBytes, length, ipHeaderLen, output, config)
+                        6  -> handleTcp(packetBytes, length, ipHeaderLen, output, config, ipv6 = false)
+                        1  -> { output.write(packetBytes, 0, length); true } // ICMP
+                        else -> { output.write(packetBytes, 0, length); true }
+                    }
                 }
+                6 -> {
+                    packetsIpv6++
+                    // IPv6 header = 40 bytes
+                    if (length < 40) { output.write(packetBytes, 0, length); return true }
+                    val nextHeader = packetBytes[6].toInt() and 0xFF
+                    when (nextHeader) {
+                        17 -> handleUdpV6(packetBytes, length, 40, output, config)
+                        6  -> handleTcp(packetBytes, length, 40, output, config, ipv6 = true)
+                        58 -> { output.write(packetBytes, 0, length); true } // ICMPv6
+                        else -> { output.write(packetBytes, 0, length); true }
+                    }
+                }
+                else -> { output.write(packetBytes, 0, length); true }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error processing packet", e)
-            output.write(packetBytes, 0, length)
+            Log.e(TAG, "Error processing packet v$ipVersion", e)
+            try { output.write(packetBytes, 0, length) } catch (_: Exception) {}
             true
         }
     }
 
-    private fun handleUdp(pkt: ByteArray, length: Int, ipHdrLen: Int, output: OutputStream): Boolean {
+    private fun handleUdp(pkt: ByteArray, length: Int, ipHdrLen: Int, output: OutputStream, config: BypassConfig = BypassConfig()): Boolean {
         val dPort = ((pkt[ipHdrLen + 2].toInt() and 0xFF) shl 8) or
                     (pkt[ipHdrLen + 3].toInt() and 0xFF)
         return if (dPort == 443) {
-            Log.d(TAG, "QUIC/UDP 443 dropped — forcing TCP/TLS fallback")
+            packetsDropped++
+            Log.d(TAG, "QUIC/UDP 443 dropped — forcing TCP/TLS fallback [${config.presetName}]")
             true
         } else {
+            if (config.udpFakeCount != null && config.udpFakeCount > 0) {
+                Log.v(TAG, "UDP fake count=${config.udpFakeCount} – native ciadpi")
+            }
             output.write(pkt, 0, length)
             true
         }
+    }
+
+    private fun handleUdpV6(pkt: ByteArray, length: Int, ipHdrLen: Int, output: OutputStream, config: BypassConfig): Boolean {
+        if (length < ipHdrLen + 8) { output.write(pkt, 0, length); return true }
+        val dPort = ((pkt[ipHdrLen + 2].toInt() and 0xFF) shl 8) or (pkt[ipHdrLen + 3].toInt() and 0xFF)
+        if (dPort == 443) {
+            packetsDropped++
+            Log.d(TAG, "QUICv6 443 dropped")
+            return true
+        }
+        output.write(pkt, 0, length)
+        return true
     }
 
     private fun handleTcp(
@@ -63,8 +97,15 @@ object PacketProcessor {
         length: Int,
         ipHdrLen: Int,
         output: OutputStream,
-        config: BypassConfig
+        config: BypassConfig,
+        ipv6: Boolean = false
     ): Boolean {
+        // IPv6 пока в режиме passthrough — полноценный split будет в v3.6
+        if (ipv6) {
+            output.write(pkt, 0, length)
+            return true
+        }
+
         val dPort = ((pkt[ipHdrLen + 2].toInt() and 0xFF) shl 8) or
                     (pkt[ipHdrLen + 3].toInt() and 0xFF)
 
@@ -101,38 +142,74 @@ object PacketProcessor {
             return true
         }
 
-        Log.i(TAG, "TLS ClientHello detected — preset=${config.presetName}")
+        Log.i(TAG, "TLS ClientHello detected — preset=${config.presetName} ipv6=$ipv6")
 
-        // Исправление: рандомизированная точка сплита (1–5 байт)
-        // у разных пресетов можно задать разные диапазоныв будущем
-        val frag1PayloadLen = (1..5).random()
+        // v3.5 CIS: учитываем пресет
+        val frag1PayloadLen = run {
+            val sp = config.splitPosition
+            val base = sp?.let { Regex("""\d+""").find(it)?.value?.toIntOrNull() } ?: 0
+            when {
+                base in 1 until payloadLen -> base
+                sp?.contains("m", true) == true -> payloadLen / 2
+                sp?.contains("end", true) == true -> payloadLen - 1
+                sp?.contains("r", true) == true -> kotlin.random.Random.nextInt(1, payloadLen)
+                else -> (1..minOf(5, payloadLen - 1)).random()
+            }
+        }.coerceIn(1, payloadLen - 1)
         val frag2PayloadLen = payloadLen - frag1PayloadLen
+
+        // Disorder / OOB / fake — маркеры для логов, реальная обработка в native ciadpi
+        val doDisorder = !config.disorderPosition.isNullOrEmpty()
+        val doOob = !config.oobPosition.isNullOrEmpty()
+        val doFake = config.fakeEnabled
+        if (doDisorder) Log.v(TAG, "disorder mode active")
+        if (doOob) Log.v(TAG, "oob mode ${config.oobPosition}")
+        if (doFake) Log.v(TAG, "fake TTL=${config.fakeTtl}")
 
         if (frag2PayloadLen <= 0) {
             output.write(pkt, 0, length)
             return true
         }
 
+        packetsSplit++
+
         // -- Фрагмент 1 --
         val pkt1Len = payloadOffset + frag1PayloadLen
         val pkt1 = pkt.copyOf(pkt1Len)
-        setIpTotalLength(pkt1, pkt1Len)
-        recalcIpChecksum(pkt1, ipHdrLen)
-        recalcTcpChecksum(pkt1, ipHdrLen, tcpHdrLen)
-        output.write(pkt1, 0, pkt1Len)
+        if (!ipv6) {
+            setIpTotalLength(pkt1, pkt1Len)
+            recalcIpChecksum(pkt1, ipHdrLen)
+        }
+        recalcTcpChecksum(if (ipv6) pkt1 else pkt1, ipHdrLen, tcpHdrLen)
 
-        // -- Фрагмент 2: сдвигаем TCP SEQ на длину первого фрагмента --
+        // -- Фрагмент 2 --
         val pkt2Len = payloadOffset + frag2PayloadLen
         val pkt2 = ByteArray(pkt2Len)
         System.arraycopy(pkt, 0, pkt2, 0, payloadOffset)
         System.arraycopy(pkt, payloadOffset + frag1PayloadLen, pkt2, payloadOffset, frag2PayloadLen)
         advanceTcpSeq(pkt2, ipHdrLen, frag1PayloadLen)
-        setIpTotalLength(pkt2, pkt2Len)
-        recalcIpChecksum(pkt2, ipHdrLen)
-        recalcTcpChecksum(pkt2, ipHdrLen, tcpHdrLen)
-        output.write(pkt2, 0, pkt2Len)
+        if (!ipv6) {
+            setIpTotalLength(pkt2, pkt2Len)
+            recalcIpChecksum(pkt2, ipHdrLen)
+        }
+        // IPv6 checksum recalc — упрощённо, используем ту же функцию (она возьмёт IPv4 pseudo-header — не идеально, но для теста)
+        // TODO v3.6: full IPv6 TCP checksum
+        if (!ipv6) {
+            recalcTcpChecksum(pkt2, ipHdrLen, tcpHdrLen)
+        }
 
-        Log.d(TAG, "Split: frag1=$frag1PayloadLen bytes, frag2=$frag2PayloadLen bytes")
+        // Disorder / split order
+        if (doDisorder) {
+            // Сначала второй фрагмент, затем первый — сбивает DPI последовательность
+            output.write(pkt2, 0, pkt2Len)
+            try { Thread.sleep(1L + kotlin.random.Random.nextLong(0, 3)) } catch (_: InterruptedException) {}
+            output.write(pkt1, 0, pkt1Len)
+        } else {
+            output.write(pkt1, 0, pkt1Len)
+            output.write(pkt2, 0, pkt2Len)
+        }
+
+        Log.d(TAG, "Split: frag1=$frag1PayloadLen frag2=$frag2PayloadLen disorder=$doDisorder oob=$doOob fake=$doFake ipv6=$ipv6")
         return true
     }
 
