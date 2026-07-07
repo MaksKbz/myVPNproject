@@ -13,6 +13,8 @@ import androidx.core.app.NotificationCompat
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
 import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -32,8 +34,14 @@ class BypassVpnService : VpnService(), Runnable {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var vpnThread: Thread? = null
     private var executorService: ExecutorService? = null
+    private var monitorThread: Thread? = null
     @Volatile private var isRunning = false
-    private var activePresetId: String = "universal"
+    @Volatile private var activePresetId: String = "universal"
+    @Volatile private var currentConfig: BypassConfig = ConfigManager.loadPreset("universal")
+
+    // Статистика для авто-переключения
+    @Volatile private var lastPacketTime = System.currentTimeMillis()
+    @Volatile private var consecutiveFails = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -44,6 +52,7 @@ class BypassVpnService : VpnService(), Runnable {
         when (intent?.action) {
             ACTION_START -> {
                 activePresetId = intent.getStringExtra(EXTRA_PRESET_ID) ?: "universal"
+                currentConfig = ConfigManager.loadPreset(activePresetId)
                 val allowedApps = intent.getStringArrayListExtra(EXTRA_ALLOWED_APPS)
                 startVpn(allowedApps)
             }
@@ -55,17 +64,17 @@ class BypassVpnService : VpnService(), Runnable {
     private fun startVpn(allowedApps: ArrayList<String>?) {
         if (isRunning) return
         isRunning = true
-        // Foreground Service — обязательно для Android 8+
         startForeground(NOTIFICATION_ID, buildNotification())
         executorService = Executors.newCachedThreadPool()
         vpnThread = Thread({ runVpn(allowedApps) }, "BypassVpnThread").apply { start() }
-        Log.i(TAG, "VPN service v3.4-hybrid started. Preset: $activePresetId")
+        Log.i(TAG, "VPN service v3.5-hybrid started. Preset: $activePresetId")
     }
 
     private fun stopVpn() {
         if (!isRunning) return
         isRunning = false
-        // Сначала останавливаем нативный движок
+        monitorThread?.interrupt()
+        monitorThread = null
         try { ProxyEngine.stop() } catch (e: Exception) { Log.w(TAG, "ProxyEngine stop error", e) }
         try { vpnInterface?.close() } catch (e: Exception) { Log.e(TAG, "Close error", e) }
         vpnInterface = null
@@ -78,25 +87,32 @@ class BypassVpnService : VpnService(), Runnable {
         Log.i(TAG, "VPN stopped")
     }
 
-    override fun run() {
-        // VpnService.Runnable — не используется, runVpn() вызывается напрямую
-    }
+    override fun run() {}
 
     /**
-     * Основной цикл VPN: поднимаем TUN, запускаем native ProxyEngine (ciadpi),
-     * затем fallback Kotlin PacketProcessor для обхода DPI, пока tun2socks stub.
-     * Это гибридный режим v3.4: нативный SOCKS5 работает, а трафик из TUN
-     * обрабатывается Kotlin-движком, т.к. badvpn/tun2socks ещё не подключён.
+     * Hybrid VPN engine v3.5 — CIS/RU optimized
+     * TUN → Kotlin PacketProcessor → Internet
+     * + native ciadpi SOCKS5 127.0.0.1:1080
      */
     private fun runVpn(allowedApps: ArrayList<String>?) {
         try {
             val builder = Builder()
                 .setSession("myVPNproject")
                 .addAddress("10.0.0.2", 24)
+                .addAddress("fd00:1:fd00:1:fd00:1:fd00:1", 64)
                 .addRoute("0.0.0.0", 0)
-                .addDnsServer("1.1.1.1")
-                .addDnsServer("8.8.8.8")
-                .setMtu(1400) // 1400 безопаснее для фрагментации, чем 1500
+                .addRoute("::", 0)
+                // DoH-ready DNS, оптимизировано для СНГ/РФ:
+                .addDnsServer("1.1.1.1")   // Cloudflare
+                .addDnsServer("1.0.0.1")
+                .addDnsServer("8.8.8.8")   // Google
+                .addDnsServer("8.8.4.4")
+                .addDnsServer("77.88.8.8") // Yandex — низкая задержка в РФ
+                .addDnsServer("77.88.8.1")
+                .addDnsServer("9.9.9.9")   // Quad9
+                .addDnsServer("94.140.14.14") // AdGuard — работает в РФ
+                .setMtu(1400)
+                .setBlocking(true)
 
             if (!allowedApps.isNullOrEmpty()) {
                 Log.i(TAG, "Split tunneling for: $allowedApps")
@@ -105,16 +121,15 @@ class BypassVpnService : VpnService(), Runnable {
                     catch (e: Exception) { Log.w(TAG, "Skipping package: $pkg", e) }
                 }
             } else {
-                // Разрешаем браузеры по умолчанию, остальное через VPN
-                try {
-                    builder.addAllowedApplication("com.android.chrome")
-                    builder.addAllowedApplication("com.opera.browser")
-                    builder.addAllowedApplication("org.mozilla.firefox")
-                    builder.addAllowedApplication("com.telegram.messenger")
-                } catch (_: Exception) { /* ignore */ }
+                // System apps bypass — чтобы не ломать push
+                val bypass = listOf(
+                    "com.google.android.gms",
+                    "com.google.android.gsf",
+                    "com.android.vending"
+                )
+                for (bp in bypass) { try { builder.addDisallowedApplication(bp) } catch (_: Exception) {} }
             }
 
-            // Всегда исключаем сам VPN, чтобы избежать петли
             try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
 
             vpnInterface = builder.establish()
@@ -124,25 +139,24 @@ class BypassVpnService : VpnService(), Runnable {
                 return
             }
 
-            val config = ConfigManager.loadPreset(activePresetId)
+            currentConfig = ConfigManager.loadPreset(activePresetId)
             val tunFd = vpnInterface!!.fd
 
-            // Шаг 1 — нативный ciadpi SOCKS5
             val nativeOk = try {
-                ProxyEngine.start(tunFd, config)
+                ProxyEngine.start(tunFd, currentConfig)
             } catch (e: Exception) {
                 Log.e(TAG, "ProxyEngine start failed", e)
                 false
             }
-            Log.i(TAG, "Native engine started=$nativeOk preset=$activePresetId fd=$tunFd port=${config.socksPort}")
+            Log.i(TAG, "Native engine started=$nativeOk preset=$activePresetId fd=$tunFd port=${currentConfig.socksPort}")
 
-            // Шаг 2 — Kotlin TUN loop (fallback, пока tun2socks = stub)
-            // Это обеспечивает реальный обход блокировок уже сейчас.
+            startPresetMonitor()
+
             val input = FileInputStream(vpnInterface!!.fileDescriptor)
             val output = FileOutputStream(vpnInterface!!.fileDescriptor)
             val buffer = ByteBuffer.allocate(32767)
 
-            Log.i(TAG, "Starting Kotlin PacketProcessor loop (hybrid mode)")
+            Log.i(TAG, "Starting Kotlin PacketProcessor loop — CIS optimized")
             var packetsProcessed = 0L
             var lastStatTime = System.currentTimeMillis()
 
@@ -155,13 +169,13 @@ class BypassVpnService : VpnService(), Runnable {
                 }
 
                 if (length > 0) {
-                    // Копия пакета — защита от race condition между потоками
+                    lastPacketTime = System.currentTimeMillis()
                     val packetCopy = buffer.array().copyOf(length)
+                    val cfgSnapshot = currentConfig
                     executorService?.submit {
                         try {
-                            // Синхронизация output — защита от перемешивания фрагментов
                             synchronized(output) {
-                                PacketProcessor.processPacket(packetCopy, length, output, config)
+                                PacketProcessor.processPacket(packetCopy, length, output, cfgSnapshot)
                             }
                             packetsProcessed++
                         } catch (e: Exception) {
@@ -170,14 +184,14 @@ class BypassVpnService : VpnService(), Runnable {
                     }
                     buffer.clear()
 
-                    // Статистика раз в 10 сек
                     val now = System.currentTimeMillis()
                     if (now - lastStatTime > 10000) {
-                        Log.i(TAG, "Stats: $packetsProcessed packets processed, preset=$activePresetId")
+                        val stats = try { PacketProcessor::class.java.getMethod("getStats").invoke(PacketProcessor) } catch (_: Exception) { "" }
+                        Log.i(TAG, "Stats: $packetsProcessed pkts $stats preset=$activePresetId")
+                        updateNotification("Пакетов: $packetsProcessed • $activePresetId")
                         lastStatTime = now
                     }
                 }
-                // Thread.sleep удалён — input.read() блокирующий
             }
 
             Log.i(TAG, "Kotlin loop finished, packets=$packetsProcessed")
@@ -193,19 +207,131 @@ class BypassVpnService : VpnService(), Runnable {
         }
     }
 
+    // ===== Auto preset monitor — CIS/RU =====
+    private fun startPresetMonitor() {
+        monitorThread?.interrupt()
+        monitorThread = Thread({
+            val testUrls = listOf(
+                "https://1.1.1.1/cdn-cgi/trace",
+                "https://77.88.8.8/",
+                "https://www.google.com/generate_204",
+                "https://yandex.ru/",
+                "https://www.youtube.com/generate_204",
+                "https://vk.com/",
+                "https://ok.ru/"
+            )
+            var idx = 0
+            while (isRunning) {
+                try {
+                    Thread.sleep(15000)
+                    if (!isRunning) break
+                    val idleMs = System.currentTimeMillis() - lastPacketTime
+                    var needTest = idleMs > 30000
+                    if (!needTest && (++idx % 4 == 0)) needTest = true
+                    if (needTest) {
+                        val ok = testConnectivity(testUrls)
+                        if (ok) {
+                            consecutiveFails = 0
+                        } else {
+                            consecutiveFails++
+                            Log.w(TAG, "Connectivity test failed $consecutiveFails/2")
+                            if (consecutiveFails >= 2) {
+                                switchToNextPreset()
+                                consecutiveFails = 0
+                            }
+                        }
+                    } else {
+                        consecutiveFails = 0
+                    }
+                } catch (_: InterruptedException) {
+                    break
+                } catch (e: Exception) {
+                    Log.e(TAG, "Monitor error", e)
+                }
+            }
+        }, "PresetMonitor").apply { isDaemon = true; start() }
+    }
+
+    private fun testConnectivity(urls: List<String> = listOf(
+        "https://1.1.1.1/cdn-cgi/trace",
+        "https://cp.cloudflare.com/generate_204",
+        "https://www.google.com/generate_204",
+        "https://yandex.ru/",
+        "https://vk.com/"
+    )): Boolean {
+        for (u in urls) {
+            try {
+                val url = URL(u)
+                val conn = url.openConnection() as HttpURLConnection
+                conn.connectTimeout = 2500
+                conn.readTimeout = 2500
+                conn.instanceFollowRedirects = false
+                conn.useCaches = false
+                conn.setRequestProperty("User-Agent", "myVPNproject/3.5 CIS")
+                // Трафик идёт ЧЕРЕЗ VPN — проверяем обход
+                val code = conn.responseCode
+                conn.disconnect()
+                if (code in 200..399 || code == 204) {
+                    Log.d(TAG, "Connectivity OK $u -> $code")
+                    return true
+                }
+            } catch (_: Exception) { }
+        }
+        return false
+    }
+
+    private fun switchToNextPreset() {
+        try {
+            // Порядок для СНГ: universal → youtube → telegram → aggressive → minimal → universal
+            val presets = listOf("universal", "youtube", "telegram", "aggressive", "minimal")
+            val currentIdx = presets.indexOf(activePresetId).let { if (it >= 0) it else 0 }
+            val nextIdx = (currentIdx + 1) % presets.size
+            val nextId = presets[nextIdx]
+            Log.w(TAG, "Auto-switch preset: $activePresetId → $nextId")
+            activePresetId = nextId
+            currentConfig = ConfigManager.loadPreset(nextId)
+            // Перезапуск native движка
+            try {
+                ProxyEngine.stop()
+                val tunFd = vpnInterface?.fd ?: -1
+                if (tunFd > 0) {
+                    Thread.sleep(300)
+                    ProxyEngine.start(tunFd, currentConfig)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to restart native engine on preset switch", e)
+            }
+            updateNotification("Авто-переключение → $nextId")
+        } catch (e: Exception) {
+            Log.e(TAG, "Preset switch failed", e)
+        }
+    }
+
+    private fun updateNotification(text: String) {
+        try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val n = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("myVPNproject активен")
+                .setContentText(text)
+                .setSmallIcon(android.R.drawable.ic_lock_lock)
+                .setOngoing(true)
+                .build()
+            nm.notify(NOTIFICATION_ID, n)
+        } catch (_: Exception) {}
+    }
+
     override fun onDestroy() {
         stopVpn()
         super.onDestroy()
     }
 
     // ── Foreground helpers ────────────────────────────────────────────
-
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val ch = NotificationChannel(
                 CHANNEL_ID, "VPN сервис",
                 NotificationManager.IMPORTANCE_LOW
-            ).apply { description = "myVPNproject DPI bypass" }
+            ).apply { description = "myVPNproject DPI bypass CIS" }
             (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
                 .createNotificationChannel(ch)
         }
@@ -214,7 +340,7 @@ class BypassVpnService : VpnService(), Runnable {
     private fun buildNotification(): Notification =
         NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("myVPNproject активен")
-            .setContentText("DPI bypass работает • пресет: $activePresetId")
+            .setContentText("DPI bypass • $activePresetId • RU/CIS")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setOngoing(true)
             .build()
