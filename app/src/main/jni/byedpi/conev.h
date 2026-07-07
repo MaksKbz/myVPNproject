@@ -13,6 +13,7 @@
 #ifndef _WIN32
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -32,6 +33,7 @@
 #define POLLRDHUP 0
 #endif
 
+#define _POLLDEF     (POLLIN | POLLRDHUP | POLLERR | POLLHUP)
 #define POLLTIMEOUT  0
 #define MAX_BUFF_INP 8
 
