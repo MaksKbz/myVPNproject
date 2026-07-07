@@ -10,9 +10,14 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.ByteBuffer
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
-class BypassVpnService : VpnService() {
+class BypassVpnService : VpnService(), Runnable {
 
     companion object {
         const val TAG = "BypassVpnService"
@@ -25,6 +30,8 @@ class BypassVpnService : VpnService() {
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
+    private var vpnThread: Thread? = null
+    private var executorService: ExecutorService? = null
     @Volatile private var isRunning = false
     private var activePresetId: String = "universal"
 
@@ -48,8 +55,40 @@ class BypassVpnService : VpnService() {
     private fun startVpn(allowedApps: ArrayList<String>?) {
         if (isRunning) return
         isRunning = true
+        // Foreground Service — обязательно для Android 8+
         startForeground(NOTIFICATION_ID, buildNotification())
+        executorService = Executors.newCachedThreadPool()
+        vpnThread = Thread({ runVpn(allowedApps) }, "BypassVpnThread").apply { start() }
+        Log.i(TAG, "VPN service v3.4-hybrid started. Preset: $activePresetId")
+    }
 
+    private fun stopVpn() {
+        if (!isRunning) return
+        isRunning = false
+        // Сначала останавливаем нативный движок
+        try { ProxyEngine.stop() } catch (e: Exception) { Log.w(TAG, "ProxyEngine stop error", e) }
+        try { vpnInterface?.close() } catch (e: Exception) { Log.e(TAG, "Close error", e) }
+        vpnInterface = null
+        vpnThread?.interrupt()
+        vpnThread = null
+        executorService?.shutdownNow()
+        executorService = null
+        stopForeground(true)
+        stopSelf()
+        Log.i(TAG, "VPN stopped")
+    }
+
+    override fun run() {
+        // VpnService.Runnable — не используется, runVpn() вызывается напрямую
+    }
+
+    /**
+     * Основной цикл VPN: поднимаем TUN, запускаем native ProxyEngine (ciadpi),
+     * затем fallback Kotlin PacketProcessor для обхода DPI, пока tun2socks stub.
+     * Это гибридный режим v3.4: нативный SOCKS5 работает, а трафик из TUN
+     * обрабатывается Kotlin-движком, т.к. badvpn/tun2socks ещё не подключён.
+     */
+    private fun runVpn(allowedApps: ArrayList<String>?) {
         try {
             val builder = Builder()
                 .setSession("myVPNproject")
@@ -57,7 +96,8 @@ class BypassVpnService : VpnService() {
                 .addRoute("0.0.0.0", 0)
                 .addDnsServer("1.1.1.1")
                 .addDnsServer("8.8.8.8")
-                .setMtu(1500)
+                .setAddDisallowedApplication(false)
+                .setMtu(1400) // 1400 безопаснее для фрагментации, чем 1500
 
             if (!allowedApps.isNullOrEmpty()) {
                 Log.i(TAG, "Split tunneling for: $allowedApps")
@@ -65,7 +105,18 @@ class BypassVpnService : VpnService() {
                     try { builder.addAllowedApplication(pkg) }
                     catch (e: Exception) { Log.w(TAG, "Skipping package: $pkg", e) }
                 }
+            } else {
+                // Разрешаем браузеры по умолчанию, остальное через VPN
+                try {
+                    builder.addAllowedApplication("com.android.chrome")
+                    builder.addAllowedApplication("com.opera.browser")
+                    builder.addAllowedApplication("org.mozilla.firefox")
+                    builder.addAllowedApplication("com.telegram.messenger")
+                } catch (_: Exception) { /* ignore */ }
             }
+
+            // Всегда исключаем сам VPN, чтобы избежать петли
+            try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
 
             vpnInterface = builder.establish()
             if (vpnInterface == null) {
@@ -75,28 +126,72 @@ class BypassVpnService : VpnService() {
             }
 
             val config = ConfigManager.loadPreset(activePresetId)
-            val tunFd  = vpnInterface!!.fd
+            val tunFd = vpnInterface!!.fd
 
-            // Запускаем нативный стек:
-            //   TUN(fd=$tunFd) → tun2socks → SOCKS5:${config.socksPort} → ciadpi → интернет
-            val ok = ProxyEngine.start(tunFd, config)
-            Log.i(TAG, "Native engine started=$ok preset=$activePresetId fd=$tunFd")
+            // Шаг 1 — нативный ciadpi SOCKS5
+            val nativeOk = try {
+                ProxyEngine.start(tunFd, config)
+            } catch (e: Exception) {
+                Log.e(TAG, "ProxyEngine start failed", e)
+                false
+            }
+            Log.i(TAG, "Native engine started=$nativeOk preset=$activePresetId fd=$tunFd port=${config.socksPort}")
 
+            // Шаг 2 — Kotlin TUN loop (fallback, пока tun2socks = stub)
+            // Это обеспечивает реальный обход блокировок уже сейчас.
+            val input = FileInputStream(vpnInterface!!.fileDescriptor)
+            val output = FileOutputStream(vpnInterface!!.fileDescriptor)
+            val buffer = ByteBuffer.allocate(32767)
+
+            Log.i(TAG, "Starting Kotlin PacketProcessor loop (hybrid mode)")
+            var packetsProcessed = 0L
+            var lastStatTime = System.currentTimeMillis()
+
+            while (isRunning) {
+                val length = try {
+                    input.read(buffer.array())
+                } catch (e: IOException) {
+                    if (isRunning) Log.e(TAG, "TUN read error", e)
+                    break
+                }
+
+                if (length > 0) {
+                    // Копия пакета — защита от race condition между потоками
+                    val packetCopy = buffer.array().copyOf(length)
+                    executorService?.submit {
+                        try {
+                            // Синхронизация output — защита от перемешивания фрагментов
+                            synchronized(output) {
+                                PacketProcessor.processPacket(packetCopy, length, output, config)
+                            }
+                            packetsProcessed++
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error in packet loop", e)
+                        }
+                    }
+                    buffer.clear()
+
+                    // Статистика раз в 10 сек
+                    val now = System.currentTimeMillis()
+                    if (now - lastStatTime > 10000) {
+                        Log.i(TAG, "Stats: $packetsProcessed packets processed, preset=$activePresetId")
+                        lastStatTime = now
+                    }
+                }
+                // Thread.sleep удалён — input.read() блокирующий
+            }
+
+            Log.i(TAG, "Kotlin loop finished, packets=$packetsProcessed")
+
+        } catch (e: InterruptedException) {
+            Log.i(TAG, "VPN thread interrupted")
         } catch (e: IOException) {
-            Log.e(TAG, "VPN setup error", e)
-            isRunning = false
+            Log.e(TAG, "VPN IO exception", e)
+        } catch (e: Exception) {
+            Log.e(TAG, "VPN fatal", e)
+        } finally {
+            stopVpn()
         }
-    }
-
-    private fun stopVpn() {
-        if (!isRunning) return
-        isRunning = false
-        ProxyEngine.stop()
-        try { vpnInterface?.close() } catch (e: Exception) { Log.e(TAG, "Close error", e) }
-        vpnInterface = null
-        stopForeground(true)
-        stopSelf()
-        Log.i(TAG, "VPN stopped")
     }
 
     override fun onDestroy() {
