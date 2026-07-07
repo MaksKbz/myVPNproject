@@ -7,6 +7,9 @@ android {
     namespace = "com.makskbz.myvpnproject"
     compileSdk = 35
 
+    // Фиксируем NDK чётко — должно совпадать с CI android.yml (Install NDK 27)
+    ndkVersion = "27.0.12077973"
+
     defaultConfig {
         applicationId = "com.makskbz.myvpnproject"
         minSdk = 24
@@ -16,12 +19,10 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
 
-        // NDK: собираем под все актуальные ABI
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         }
 
-        // CMake: путь к CMakeLists.txt и флаги компиляции
         externalNativeBuild {
             cmake {
                 cppFlags += "-std=c++17"
@@ -30,7 +31,6 @@ android {
         }
     }
 
-    // Подключаем CMake как систему сборки нативного кода
     externalNativeBuild {
         cmake {
             path = file("src/main/jni/CMakeLists.txt")
