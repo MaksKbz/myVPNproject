@@ -7,14 +7,35 @@ android {
     namespace = "com.makskbz.myvpnproject"
     compileSdk = 35
 
+    // Фиксируем NDK чётко — должно совпадать с CI android.yml (Install NDK 27)
+    ndkVersion = "27.0.12077973"
+
     defaultConfig {
         applicationId = "com.makskbz.myvpnproject"
         minSdk = 24
         targetSdk = 35
-        versionCode = 14
-        versionName = "3.2.0"
+        versionCode = 15
+        versionName = "3.3.0-native"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
+
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-std=c++17"
+                arguments += "-DANDROID_STL=c++_shared"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/jni/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     buildTypes {
