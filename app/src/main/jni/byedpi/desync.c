@@ -16,6 +16,7 @@
 #else
 #include <linux/tcp.h>
 #include <linux/filter.h>
+#include <fcntl.h>  /* vmsplice, splice, SPLICE_F_GIFT */
 #endif
 #else
 #include <winsock2.h>

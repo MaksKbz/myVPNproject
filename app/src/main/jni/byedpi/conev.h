@@ -74,7 +74,7 @@ struct eval {
     uint64_t dp_mask;
     int   detect;
     bool  mark;
-    /* int to_count; */  /* commented out — sync with upstream hufrea/byedpi */
+    int   to_count;  /* timeout counter — used by extend.c on_timeout */
     int   tls_rec_size;
     int   tls_rec_pos;
     uint8_t tls_rec[5];

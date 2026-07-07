@@ -13,11 +13,34 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>  /* assert() */
 #include "proxy.h"
 #include "error.h"
 #include "params.h"
 #include "desync.h"
 #include "packets.h"
+
+/* SOCKS5 minimal definitions needed by on_socks_recv / on_socks_conn.
+ * Full definitions live in proxy.c; we only need the struct and constants here. */
+#ifndef S_VER5
+#define S_VER5   0x05
+#define S_ER_OK  0x00
+#define S_CMD_CONN 0x01
+
+#pragma pack(push, 1)
+struct s5_req {
+    uint8_t ver;
+    uint8_t cmd;
+    uint8_t rsv;
+    uint8_t atyp;
+    union {
+        struct { struct in_addr  addr; uint16_t port; } v4;
+        struct { struct in6_addr addr; uint16_t port; } v6;
+        struct { uint8_t len; char name[256]; uint16_t port; } dn;
+    } dst;
+};
+#pragma pack(pop)
+#endif /* S_VER5 */
 
 /* Forward declaration to allow socket_mod() to call protect() */
 #ifdef __linux__

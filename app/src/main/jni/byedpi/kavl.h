@@ -6,6 +6,12 @@
 #include <stdint.h>
 #define KAVL_MAX_DEPTH 64
 #define kavl_size(head, x) ((x) ? (x)->size__ : 0)
+
+/* KAVL_HEAD embeds the AVL bookkeeping fields into a struct.
+ * Usage:  KAVL_HEAD(struct my_type) head;
+ * This expands to an anonymous struct with left__, right__, balance__. */
+#define KAVL_HEAD(type) struct { type *left__; type *right__; signed char balance__; }
+
 #define KAVL_INIT2(suf, __scope, __type, __head, __cmp) \
     __scope void kavl_insert_##suf(__type **root_, __type *x, unsigned *cnt_) { \
         __type *p, *b[KAVL_MAX_DEPTH], *path[KAVL_MAX_DEPTH]; \
