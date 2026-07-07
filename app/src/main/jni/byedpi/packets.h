@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <sys/types.h>
 
 #define IS_TCP   1
 #define IS_UDP   2
@@ -26,21 +27,28 @@ extern char tls_data[517];
 extern char http_data[43];
 extern char udp_data[64];
 
-int   change_tls_sni(const char *host, char *buffer, ssize_t bsize, ssize_t nn);
-bool  is_tls_chello(const char *buffer, size_t bsize);
-bool  is_tls_shello(const char *buffer, size_t bsize);
-int   parse_tls(const char *buffer, size_t bsize, char **hs);
-bool  is_http(const char *buffer, size_t bsize);
-int   parse_http(const char *buffer, size_t bsize, char **hs, uint16_t *port);
-int   mod_http(char *buffer, size_t bsize, int m);
-bool  is_http_redirect(const char *req, size_t qn, const char *resp, size_t sn);
-bool  neq_tls_sid(const char *req, size_t qn, const char *resp, size_t sn);
-int   part_tls(char *buffer, size_t bsize, ssize_t n, long pos);
-void  randomize_tls(char *buffer, ssize_t n);
+int      change_tls_sni(const char *host, char *buffer, ssize_t bsize, ssize_t nn);
+bool     is_tls_chello(const char *buffer, size_t bsize);
+bool     is_tls_shello(const char *buffer, size_t bsize);
+int      parse_tls(const char *buffer, size_t bsize, char **hs);
+bool     is_http(const char *buffer, size_t bsize);
+int      parse_http(const char *buffer, size_t bsize, char **hs, uint16_t *port);
+int      mod_http(char *buffer, size_t bsize, int m);
+bool     is_http_redirect(const char *req, size_t qn, const char *resp, size_t sn);
+bool     neq_tls_sid(const char *req, size_t qn, const char *resp, size_t sn);
+int      part_tls(char *buffer, size_t bsize, ssize_t n, long pos);
+void     randomize_tls(char *buffer, ssize_t n);
 uint16_t ip_checksum(const void *data, size_t len);
 uint16_t tcp_checksum(const void *pseudo, const void *data, size_t len);
-int   fake_tls_init(struct packet *pkt, size_t len);
-int   fake_http_init(struct packet *pkt);
-int   fake_udp_init(struct packet *pkt, size_t len);
 
+/* fake_*_init use struct packet defined in params.h.
+ * Guard against circular include: params.h -> mpool.h -> (no packets.h),
+ * so including params.h here is safe. */
+#ifndef PARAMS_H
+#include "params.h"
 #endif
+int fake_tls_init(struct packet *pkt, size_t len);
+int fake_http_init(struct packet *pkt);
+int fake_udp_init(struct packet *pkt, size_t len);
+
+#endif /* PACKETS_H */
