@@ -42,10 +42,7 @@ char tls_data[517] = {
     "\x4b\xfb\x0e\x00\x15\x00\xac\x00\x00\x00\x00\x00\x00"
 };
 
-char http_data[43]
-#if defined(__GNUC__) && !defined(__clang__)
-__attribute__((nonstring))
-#endif = {
+char http_data[43] = {
     "GET / HTTP/1.1\r\n"
     "Host: www.wikipedia.org\r\n\r\n"
 };

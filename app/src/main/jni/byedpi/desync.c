@@ -460,6 +460,7 @@ ssize_t desync(struct poolhd *pool, struct eval *val,
             }
             LOG(LOG_S, "split: pos=%ld-%ld (%ld), m: %s\n",
                 lp, pos, (long)s, demode_str[part.m]);
+        }
         val->pair->part_sent = curr_part;
         if (s == ERR_WAIT) {
             set_timer(pool, val, params.await_int);
