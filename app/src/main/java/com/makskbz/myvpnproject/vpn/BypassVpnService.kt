@@ -46,13 +46,6 @@ class BypassVpnService : VpnService(), Runnable {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        // Инициализируем DoH резолвер — защита от DNS-спуфинга РКН
-        try {
-            DohResolver.init(cacheDir)
-            Log.i(TAG, "DoH resolver initialized")
-        } catch (e: Exception) {
-            Log.w(TAG, "DoH init failed: ${e.message}")
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -266,33 +259,6 @@ class BypassVpnService : VpnService(), Runnable {
         "https://yandex.ru/",
         "https://vk.com/"
     )): Boolean {
-        // Сначала пробуем через DoH-клиент (защита от DNS-спуфинга)
-        try {
-            val client = try {
-                DohResolver.getOkHttpClientWithDoh(cacheDir)
-            } catch (_: Exception) { null }
-            if (client != null) {
-                for (u in urls) {
-                    try {
-                        val req = okhttp3.Request.Builder()
-                            .url(u)
-                            .header("User-Agent", "myVPNproject/3.6 CIS DoH")
-                            .get()
-                            .build()
-                        client.newCall(req).execute().use { resp ->
-                            val code = resp.code
-                            if (code in 200..399 || code == 204) {
-                                Log.d(TAG, "Connectivity OK (DoH) $u -> $code")
-                                return true
-                            }
-                        }
-                    } catch (_: Exception) { }
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "DoH test failed, fallback to HttpURLConnection: ${e.message}")
-        }
-        // Fallback: старый метод
         for (u in urls) {
             try {
                 val url = URL(u)
