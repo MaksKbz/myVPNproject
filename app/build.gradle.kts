@@ -14,8 +14,8 @@ android {
         applicationId = "com.makskbz.myvpnproject"
         minSdk = 24
         targetSdk = 35
-        versionCode = 15
-        versionName = "3.3.0-native"
+        versionCode = 17
+        versionName = "3.6.1-cis-max"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
 
@@ -66,6 +66,12 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+
+    // v3.6: позволяет plain JUnit-тестам вызывать android.util.Log (PacketProcessor и др.)
+    // без Robolectric — Log.* просто возвращает значения по умолчанию (0 / "").
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
@@ -78,6 +84,10 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.appcompat:appcompat:1.7.0")
+    // === v3.6.1: DoH-клиент переписан на чистом javax.net.ssl.HttpsURLConnection +
+    // org.json (уже используется в ConfigManager) — okhttp/okhttp-dnsoverhttps/
+    // coroutines сознательно убраны: именно эта связка сломала сборку CI
+    // в предыдущей версии (см. DohResolver.kt). Zero новых зависимостей = zero риска.
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")

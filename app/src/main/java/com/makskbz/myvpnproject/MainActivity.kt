@@ -160,9 +160,9 @@ fun MainScreen(
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.primary
         )
-        // Исправление #2: актуальная версия и архитектура
+        // v3.6 CIS-MAX: IPv6 split + DoH DNS intercept + ASN-пресеты СНГ
         Text(
-            text = "DPI Bypass v3.2.0 \u2022 Kotlin userspace engine",
+            text = "DPI Bypass v3.6 CIS-MAX \u2022 Kotlin + native ciadpi",
             fontSize = 12.sp,
             color = Color.Gray,
             modifier = Modifier.padding(bottom = 12.dp)
@@ -340,19 +340,25 @@ fun HelpTab() {
                 Spacer(Modifier.height(8.dp))
                 Text(
                     "1. Выберите пресет на вкладке \u2018Пресеты\u2019.\n" +
-                    "   \u2022 Универсальный \u2014 для большинства случаев.\n" +
+                    "   \u2022 Универсальный \u2014 для большинства случаев,\n" +
+                    "     автоматически определяет оператора по ASN.\n" +
                     "   \u2022 YouTube \u2014 если YouTube заблокирован.\n" +
                     "   \u2022 Telegram \u2014 для обхода блокировок Telegram.\n" +
                     "   \u2022 Минимальный \u2014 экономия батареи.\n" +
-                    "   \u2022 Максимальный \u2014 если остальные не помогли.\n\n" +
+                    "   \u2022 Максимальный \u2014 если остальные не помогли.\n" +
+                    "   \u2022 KZ/МТС/Билайн/Ростелеком \u2014 точный тюнинг\n" +
+                    "     под конкретного оператора СНГ.\n\n" +
                     "2. На вкладке \u2018Приложения\u2019 отметьте браузеры\n" +
                     "   и приложения, трафик которых нужно обходить.\n\n" +
                     "3. Нажмите \u2018ЗАПУСТИТЬ VPN\u2019.\n\n" +
                     "Как работает:\n" +
                     "Трафик перехватывается локально на устройстве\n" +
                     "(не уходит на внешний сервер). TLS ClientHello\n" +
-                    "разбивается на фрагменты \u2014 DPI провайдера не\n" +
-                    "распознаёт сигнатуру блокируемого ресурса.",
+                    "разбивается на фрагменты (IPv4 и IPv6) \u2014 DPI\n" +
+                    "провайдера не распознаёт сигнатуру блокируемого\n" +
+                    "ресурса. Обычный DNS (UDP:53) перехватывается и\n" +
+                    "резолвится через DoH \u2014 провайдер не видит,\n" +
+                    "какие домены вы посещаете.",
                     fontSize = 13.sp,
                     lineHeight = 19.sp
                 )
@@ -370,23 +376,26 @@ fun HelpTab() {
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    "Архитектура v3.2.0",
+                    "Архитектура v3.6 CIS-MAX",
                     fontWeight = FontWeight.Bold, fontSize = 15.sp,
                     color = MaterialTheme.colorScheme.primary
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Текущая архитектура: Kotlin userspace\n" +
-                    "Трафик: TUN \u2192 PacketProcessor.kt (TCP split)\n\n" +
+                    "TUN \u2192 PacketProcessor.kt (TCP split, IPv4+IPv6)\n" +
+                    "         + DnsInterceptor.kt (DNS\u2192DoH)\n" +
+                    "    \u2192 native ciadpi SOCKS5 127.0.0.1:1080\n\n" +
                     "Движок:\n" +
-                    "  \u2022 TCP фрагментация TLS ClientHello\n" +
+                    "  \u2022 TCP фрагментация TLS ClientHello (v4 и v6)\n" +
                     "  \u2022 QUIC/UDP 443 \u2014 дроп (fallback на TCP)\n" +
-                    "  \u2022 Случайная точка сплита (1\u20135 байт)\n" +
-                    "  \u2022 Пересчёт IP/TCP чексумм\n\n" +
-                    "Следующий этап:\n" +
-                    "Нативный движок ciadpi через JNI (byedpi).\n" +
-                    "Детали: github.com/MaksKbz/myVPNproject\n" +
-                    "        \u2192 AUDIT_AND_ROADMAP.md",
+                    "  \u2022 Перехват UDP:53 \u2192 резолв через DoH\n" +
+                    "  \u2022 Авто-определение оператора по ASN\n" +
+                    "  \u2022 Пресеты СНГ: kz-telecom/mts-ru/beeline-ru/\n" +
+                    "    rostelecom\n\n" +
+                    "В разработке (см. TUN2SOCKS_AND_ECH_PLAN.md):\n" +
+                    "  \u2022 tun2socks (badvpn) \u2014 нативный zero-copy\n" +
+                    "  \u2022 ECH (Encrypted Client Hello, TLS 1.3)\n" +
+                    "Детали: github.com/MaksKbz/myVPNproject",
                     fontSize = 12.sp,
                     lineHeight = 18.sp,
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,

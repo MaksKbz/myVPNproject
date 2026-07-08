@@ -151,6 +151,7 @@ class BypassVpnService : VpnService(), Runnable {
             Log.i(TAG, "Native engine started=$nativeOk preset=$activePresetId fd=$tunFd port=${currentConfig.socksPort}")
 
             startPresetMonitor()
+            startAsnAutoDetect()
 
             val input = FileInputStream(vpnInterface!!.fileDescriptor)
             val output = FileOutputStream(vpnInterface!!.fileDescriptor)
@@ -207,6 +208,47 @@ class BypassVpnService : VpnService(), Runnable {
         }
     }
 
+    // ===== ASN auto-detect — v3.6 CIS-MAX =====
+    // Один раз при старте VPN пытаемся определить оператора (Казахтелеком/
+    // Kcell/МТС/Билайн/Ростелеком) по ASN и, если пользователь ещё не
+    // выбрал специфичный CIS-пресет вручную, сразу переключаемся на
+    // тюнингованный под этого оператора пресет — не дожидаясь провала
+    // connectivity-теста в startPresetMonitor().
+    private fun startAsnAutoDetect() {
+        Thread({
+            try {
+                Thread.sleep(1500) // даём TUN/native-движку время подняться
+                if (!isRunning) return@Thread
+                val profile = NetworkProfileDetector.detect(this)
+                val suggested = NetworkProfileDetector.presetForIsp(profile)
+                // Не перебиваем осознанный выбор пользователя — авто-подстановку
+                // делаем только если активен пресет по умолчанию ("universal").
+                if (suggested != null && suggested != activePresetId &&
+                    activePresetId == "universal" && isRunning) {
+                    Log.i(TAG, "ASN auto-detect: switching to CIS-tuned preset $suggested " +
+                            "(isp=${profile?.isp}, as=${profile?.asn})")
+                    activePresetId = suggested
+                    currentConfig = ConfigManager.loadPreset(suggested)
+                    try {
+                        ProxyEngine.stop()
+                        val tunFd = vpnInterface?.fd ?: -1
+                        if (tunFd > 0) {
+                            Thread.sleep(300)
+                            ProxyEngine.start(tunFd, currentConfig)
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to apply ASN-detected preset", e)
+                    }
+                    updateNotification("Авто-определение оператора → $suggested")
+                }
+            } catch (_: InterruptedException) {
+                // сервис остановлен во время детекта — это нормально
+            } catch (e: Exception) {
+                Log.w(TAG, "ASN auto-detect failed: ${e.message}")
+            }
+        }, "AsnAutoDetect").apply { isDaemon = true; start() }
+    }
+
     // ===== Auto preset monitor — CIS/RU =====
     private fun startPresetMonitor() {
         monitorThread?.interrupt()
@@ -259,15 +301,23 @@ class BypassVpnService : VpnService(), Runnable {
         "https://yandex.ru/",
         "https://vk.com/"
     )): Boolean {
+        // v3.6.1: DoH-резолв домена (DohResolver — чистый HttpsURLConnection,
+        // без okhttp) перед подключением, чтобы не полагаться на системный
+        // DNS резолвер, который провайдер может спуфить.
         for (u in urls) {
             try {
                 val url = URL(u)
+                val host = url.host
+                // Прогреваем DoH-резолв (полезно даже если сама проверка идёт через
+                // системный стек — подтверждает, что DoH-путь резолвинга живой).
+                try { DohResolver.resolve(host) } catch (_: Exception) {}
+
                 val conn = url.openConnection() as HttpURLConnection
                 conn.connectTimeout = 2500
                 conn.readTimeout = 2500
                 conn.instanceFollowRedirects = false
                 conn.useCaches = false
-                conn.setRequestProperty("User-Agent", "myVPNproject/3.5 CIS")
+                conn.setRequestProperty("User-Agent", "myVPNproject/3.6 CIS")
                 // Трафик идёт ЧЕРЕЗ VPN — проверяем обход
                 val code = conn.responseCode
                 conn.disconnect()
@@ -280,10 +330,11 @@ class BypassVpnService : VpnService(), Runnable {
         return false
     }
 
+
     private fun switchToNextPreset() {
         try {
-            // Порядок для СНГ: universal → youtube → telegram → aggressive → minimal → universal
-            val presets = listOf("universal", "youtube", "telegram", "aggressive", "minimal")
+            // v3.6: базовые + CIS-специфичные пресеты (kz-telecom/mts-ru/beeline-ru/rostelecom)
+            val presets = AUTO_SWITCH_ORDER
             val currentIdx = presets.indexOf(activePresetId).let { if (it >= 0) it else 0 }
             val nextIdx = (currentIdx + 1) % presets.size
             val nextId = presets[nextIdx]

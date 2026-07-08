@@ -1,4 +1,4 @@
-# myVPNproject v3.3.0-native — Android DPI Bypass
+# myVPNproject v3.6.1 CIS-MAX — Android DPI Bypass
 
 Android-приложение для обхода DPI-блокировок без root и без внешнего сервера.  
 Трафик перехватывается локально через TUN-интерфейс и форвардируется через нативный движок ciadpi.
@@ -37,7 +37,12 @@ Android-приложение для обхода DPI-блокировок без
 | `ProxyEngine.kt` | Kotlin JNI-мост: запуск ciadpi → tun2socks |
 | `ciadpi_jni.c` | C JNI-мост для byedpi (stub → реальный после submodule) |
 | `tun2socks_jni.c` | C JNI-мост для badvpn/tun2socks (stub → реальный) |
-| `ConfigManager.kt` | Пресеты, JSON-сериализация конфигурации |
+| `ConfigManager.kt` | Пресеты (включая СНГ: kz-telecom/mts-ru/beeline-ru/rostelecom), JSON-сериализация конфигурации |
+| `PacketProcessor.kt` | TCP split TLS ClientHello (IPv4 + IPv6), делегирует DNS в `DnsInterceptor` |
+| `DnsInterceptor.kt` | Перехват UDP:53 на уровне TUN → резолв через `DohResolver` → синтез DNS-ответа |
+| `DohResolver.kt` | DoH-клиент на чистом `HttpsURLConnection`/`org.json` (без внешних зависимостей) |
+| `NetworkProfileDetector.kt` | Авто-определение оператора СНГ по ASN (ip-api.com через `protect()`-сокет) |
+| `ChecksumUtils.kt` | IPv4/IPv6 IP/TCP/UDP чек-суммы, общие для PacketProcessor и DnsInterceptor |
 | `MainActivity.kt` | UI: Jetpack Compose — пресеты, приложения, справка |
 
 ---
@@ -51,6 +56,11 @@ Android-приложение для обхода DPI-блокировок без
 | `telegram` | Telegram | Блокировки Telegram |
 | `minimal` | Минимальный | Экономия батареи |
 | `aggressive` | Максимальный | Ничего другого не помогло |
+| `kz-telecom` | Казахтелеком / Kcell (KZ) | Казахстанские операторы |
+| `mts-ru` | МТС (РФ) | Блокировки под МТС |
+| `beeline-ru` | Билайн (РФ) | Блокировки под Билайн |
+| `rostelecom` | Ростелеком (РФ) | Блокировки под ТСПУ Ростелекома |
+
 
 ---
 
@@ -102,13 +112,22 @@ Artifact доступен в разделе [Actions](https://github.com/MaksKbz
 
 ---
 
-## Дорожная карта
+## Дорожная карта v3.6 CIS-MAX
 
 - [x] Kotlin userspace TCP split (v3.2.0)
 - [x] JNI каркас: CMake + ciadpi_jni + tun2socks_jni + ProxyEngine.kt (v3.3.0-native)
-- [ ] Добавить submodule byedpi и раскомментировать proxy_run()
-- [ ] Добавить submodule badvpn и раскомментировать tun2socks_run()
-- [ ] Полное E2E-тестирование на реальном устройстве
+- [x] byedpi vendored (не submodule) — ciadpi_jni.c реально вызывает `run()` из byedpi/proxy.c
+- [x] IPv6 TCP split — полностью реализован (ChecksumUtils, PacketProcessor, юнит-тесты)
+- [x] DoH-клиент — перехват UDP:53 на уровне TUN + резолв через DoH (DnsInterceptor.kt),
+      а не просто список DoH-совместимых DNS-серверов
+- [x] Пресеты СНГ: `kz-telecom`, `mts-ru`, `beeline-ru`, `rostelecom` + авто-определение
+      оператора по ASN (NetworkProfileDetector.kt, ip-api.com через protect()-сокет)
+- [ ] tun2socks (badvpn) — всё ещё stub. Требует патча `--tunfd` в badvpn или
+      полного JNI-рефакторинга с портированием lwIP под Bionic.
+      См. подробный план: [`TUN2SOCKS_AND_ECH_PLAN.md`](./TUN2SOCKS_AND_ECH_PLAN.md)
+- [ ] ECH (Encrypted Client Hello) — требует сборки BoringSSL с ECH под NDK
+      и локального TLS-терминирующего прокси. См. тот же план-документ.
+- [ ] Полное E2E-тестирование на реальном устройстве (Алматы / РФ)
 
 ---
 

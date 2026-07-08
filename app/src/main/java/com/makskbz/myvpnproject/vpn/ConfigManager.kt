@@ -25,7 +25,12 @@ data class BypassConfig(
     val modHttp: String? = null,
     val autoMode: String? = null,
     val udpFakeCount: Int? = null,
-    val allowedApps: List<String> = emptyList()
+    val allowedApps: List<String> = emptyList(),
+    // v3.6: перехватывать UDP:53 (plain DNS) на уровне TUN и отвечать
+    // через DoH — так запрос никогда не выходит на провайдера в открытом
+    // виде, даже если приложение игнорирует системный DNS и стучится
+    // напрямую в 8.8.8.8:53/77.88.8.8:53 и т.п.
+    val dnsInterceptEnabled: Boolean = true
 )
 
 /**
@@ -110,7 +115,87 @@ val PRESETS: List<Preset> = listOf(
             modHttp = "h,d,r",
             tlsRec = "1+s"
         )
+    ),
+
+    // ==========================================================================
+    // v3.6 CIS-MAX — пресеты, тюнингованные под конкретных операторов СНГ.
+    // TTL для fake-пакетов подобран так, чтобы пакет "умирал" примерно на
+    // границе между клиентом и DPI-коробкой оператора, но не долетал до
+    // реального сервера назначения — тогда DPI видит валидный (поддельный)
+    // ClientHello, а настоящий сервер его никогда не получает.
+    // Значения TTL — эмпирические ориентиры по типичной топологии сети
+    // оператора (число хопов до пограничного DPI), могут потребовать
+    // ручной подстройки под конкретный регион/сегмент сети.
+    // ==========================================================================
+    Preset(
+        id = "kz-telecom",
+        name = "Казахтелеком / Kcell (KZ)",
+        description = "Тюнинг под ТСПУ-подобные DPI казахстанских операторов: OOB + fake TTL=4 + disorder.",
+        config = BypassConfig(
+            presetName = "kz-telecom",
+            oobPosition = "2",
+            disorderPosition = "1",
+            fakeEnabled = true,
+            fakeTtl = 4,
+            dropSack = true,
+            autoMode = "n,r"
+        )
+    ),
+    Preset(
+        id = "mts-ru",
+        name = "МТС (РФ)",
+        description = "Split + fake TTL=5 + TLS record split — под DPI МТС.",
+        config = BypassConfig(
+            presetName = "mts-ru",
+            splitPosition = "2",
+            disorderPosition = "1",
+            fakeEnabled = true,
+            fakeTtl = 5,
+            dropSack = true,
+            tlsRec = "1",
+            autoMode = "r,s"
+        )
+    ),
+    Preset(
+        id = "beeline-ru",
+        name = "Билайн (РФ)",
+        description = "OOB по SNI + fake TTL=6 + HTTP-модификация — под DPI Билайна.",
+        config = BypassConfig(
+            presetName = "beeline-ru",
+            oobPosition = "1+s",
+            fakeEnabled = true,
+            fakeTtl = 6,
+            modHttp = "h,d",
+            autoMode = "n,t"
+        )
+    ),
+    Preset(
+        id = "rostelecom",
+        name = "Ростелеком (РФ)",
+        description = "Агрессивный набор под ТСПУ Ростелекома: split+disorder+fake TTL=3+drop SACK.",
+        config = BypassConfig(
+            presetName = "rostelecom",
+            splitPosition = "1+s",
+            disorderPosition = "1+s",
+            fakeEnabled = true,
+            fakeTtl = 3,
+            dropSack = true,
+            tlsRec = "1+s",
+            modHttp = "h,d,r",
+            autoMode = "r,t,s"
+        )
     )
+)
+
+/**
+ * Порядок для авто-переключения при неудачных проверках соединения.
+ * CIS-специфичные пресеты идут после базовых — их предлагаем, если
+ * универсальные методы не сработали (или если ASN-детект уже подсказал
+ * оператора — тогда его пресет ставится первым, см. BypassVpnService).
+ */
+val AUTO_SWITCH_ORDER: List<String> = listOf(
+    "universal", "youtube", "telegram", "aggressive", "minimal",
+    "kz-telecom", "mts-ru", "beeline-ru", "rostelecom"
 )
 
 // ==============================================================================
@@ -156,6 +241,7 @@ object ConfigManager {
         c.modHttp?.let  { o.put("modHttp", it) }
         c.autoMode?.let { o.put("autoMode", it) }
         c.udpFakeCount?.let { o.put("udpFakeCount", it) }
+        o.put("dnsInterceptEnabled", c.dnsInterceptEnabled)
         val arr = org.json.JSONArray()
         c.allowedApps.forEach { arr.put(it) }
         o.put("allowedApps", arr)
@@ -182,7 +268,8 @@ object ConfigManager {
             modHttp          = o.optString("modHttp").ifEmpty { null },
             autoMode         = o.optString("autoMode").ifEmpty { null },
             udpFakeCount     = if (o.has("udpFakeCount")) o.getInt("udpFakeCount") else null,
-            allowedApps      = apps
+            allowedApps      = apps,
+            dnsInterceptEnabled = o.optBoolean("dnsInterceptEnabled", true)
         )
     }
 

@@ -7,21 +7,23 @@ object PacketProcessor {
 
     private const val TAG = "PacketProcessor"
 
-    // === v3.5 CIS statistics ===
+    // === v3.6 CIS statistics ===
     @Volatile private var packetsTotal = 0L
     @Volatile private var packetsSplit = 0L
     @Volatile private var packetsDropped = 0L
     @Volatile private var packetsIpv6 = 0L
+    @Volatile private var packetsSplitIpv6 = 0L
 
-    fun getStats(): String = "total=$packetsTotal split=$packetsSplit dropped=$packetsDropped ipv6=$packetsIpv6"
+    fun getStats(): String =
+        "total=$packetsTotal split=$packetsSplit splitV6=$packetsSplitIpv6 dropped=$packetsDropped ipv6=$packetsIpv6"
 
     /**
      * Обрабатывает сырые IP-пакеты и записывает результат в output.
      *
-     * v3.0 — исправления:
-     * - Принимает BypassConfig для пресет-зависимой обработки
-     * - Рандомизированная точка сплита TLS ClientHello (1–5 байт)
-     * - Вызывается уже с копией пакета (без race condition)
+     * v3.6 — IPv6 TCP split реализован полностью (был passthrough в v3.5):
+     * тот же алгоритм фрагментации TLS ClientHello, что и для IPv4,
+     * но с 40-байтным заголовком и честным IPv6 pseudo-header checksum
+     * (см. ChecksumUtils.recalcTcpChecksumV6).
      */
     fun processPacket(packetBytes: ByteArray, length: Int, output: OutputStream, config: BypassConfig = BypassConfig()): Boolean {
         packetsTotal++
@@ -45,12 +47,12 @@ object PacketProcessor {
                 }
                 6 -> {
                     packetsIpv6++
-                    // IPv6 header = 40 bytes
-                    if (length < 40) { output.write(packetBytes, 0, length); return true }
+                    // IPv6 header = 40 bytes (расширения заголовков не поддерживаются)
+                    if (length < ChecksumUtils.IPV6_HEADER_LEN) { output.write(packetBytes, 0, length); return true }
                     val nextHeader = packetBytes[6].toInt() and 0xFF
                     when (nextHeader) {
-                        17 -> handleUdpV6(packetBytes, length, 40, output, config)
-                        6  -> handleTcp(packetBytes, length, 40, output, config, ipv6 = true)
+                        17 -> handleUdp(packetBytes, length, ChecksumUtils.IPV6_HEADER_LEN, output, config, ipv6 = true)
+                        6  -> handleTcp(packetBytes, length, ChecksumUtils.IPV6_HEADER_LEN, output, config, ipv6 = true)
                         58 -> { output.write(packetBytes, 0, length); true } // ICMPv6
                         else -> { output.write(packetBytes, 0, length); true }
                     }
@@ -64,12 +66,27 @@ object PacketProcessor {
         }
     }
 
-    private fun handleUdp(pkt: ByteArray, length: Int, ipHdrLen: Int, output: OutputStream, config: BypassConfig = BypassConfig()): Boolean {
+    private fun handleUdp(
+        pkt: ByteArray,
+        length: Int,
+        ipHdrLen: Int,
+        output: OutputStream,
+        config: BypassConfig = BypassConfig(),
+        ipv6: Boolean = false
+    ): Boolean {
+        if (length < ipHdrLen + 4) { output.write(pkt, 0, length); return true }
+
+        // v3.6: перехват plain DNS (UDP:53) → резолв через DoH, чтобы запрос
+        // никогда не ушёл провайдеру в открытом виде (см. DnsInterceptor.kt).
+        if (DnsInterceptor.tryIntercept(pkt, length, ipHdrLen, output, ipv6, config)) {
+            return true
+        }
+
         val dPort = ((pkt[ipHdrLen + 2].toInt() and 0xFF) shl 8) or
                     (pkt[ipHdrLen + 3].toInt() and 0xFF)
         return if (dPort == 443) {
             packetsDropped++
-            Log.d(TAG, "QUIC/UDP 443 dropped — forcing TCP/TLS fallback [${config.presetName}]")
+            Log.d(TAG, "QUIC/UDP${if (ipv6) "v6" else ""} 443 dropped — forcing TCP/TLS fallback [${config.presetName}]")
             true
         } else {
             if (config.udpFakeCount != null && config.udpFakeCount > 0) {
@@ -80,18 +97,10 @@ object PacketProcessor {
         }
     }
 
-    private fun handleUdpV6(pkt: ByteArray, length: Int, ipHdrLen: Int, output: OutputStream, config: BypassConfig): Boolean {
-        if (length < ipHdrLen + 8) { output.write(pkt, 0, length); return true }
-        val dPort = ((pkt[ipHdrLen + 2].toInt() and 0xFF) shl 8) or (pkt[ipHdrLen + 3].toInt() and 0xFF)
-        if (dPort == 443) {
-            packetsDropped++
-            Log.d(TAG, "QUICv6 443 dropped")
-            return true
-        }
-        output.write(pkt, 0, length)
-        return true
-    }
-
+    /**
+     * Универсальная фрагментация TLS ClientHello для IPv4 и IPv6.
+     * Разница только в длине IP-заголовка и алгоритме чек-суммы (pseudo-header).
+     */
     private fun handleTcp(
         pkt: ByteArray,
         length: Int,
@@ -100,12 +109,6 @@ object PacketProcessor {
         config: BypassConfig,
         ipv6: Boolean = false
     ): Boolean {
-        // IPv6 пока в режиме passthrough — полноценный split будет в v3.6
-        if (ipv6) {
-            output.write(pkt, 0, length)
-            return true
-        }
-
         val dPort = ((pkt[ipHdrLen + 2].toInt() and 0xFF) shl 8) or
                     (pkt[ipHdrLen + 3].toInt() and 0xFF)
 
@@ -144,7 +147,6 @@ object PacketProcessor {
 
         Log.i(TAG, "TLS ClientHello detected — preset=${config.presetName} ipv6=$ipv6")
 
-        // v3.5 CIS: учитываем пресет
         val frag1PayloadLen = run {
             val sp = config.splitPosition
             val base = sp?.let { Regex("""\d+""").find(it)?.value?.toIntOrNull() } ?: 0
@@ -158,7 +160,6 @@ object PacketProcessor {
         }.coerceIn(1, payloadLen - 1)
         val frag2PayloadLen = payloadLen - frag1PayloadLen
 
-        // Disorder / OOB / fake — маркеры для логов, реальная обработка в native ciadpi
         val doDisorder = !config.disorderPosition.isNullOrEmpty()
         val doOob = !config.oobPosition.isNullOrEmpty()
         val doFake = config.fakeEnabled
@@ -171,31 +172,33 @@ object PacketProcessor {
             return true
         }
 
-        packetsSplit++
+        if (ipv6) packetsSplitIpv6++ else packetsSplit++
 
         // -- Фрагмент 1 --
         val pkt1Len = payloadOffset + frag1PayloadLen
         val pkt1 = pkt.copyOf(pkt1Len)
-        if (!ipv6) {
-            setIpTotalLength(pkt1, pkt1Len)
-            recalcIpChecksum(pkt1, ipHdrLen)
+        if (ipv6) {
+            ChecksumUtils.setIpv6PayloadLength(pkt1, pkt1Len - ChecksumUtils.IPV6_HEADER_LEN)
+            ChecksumUtils.recalcTcpChecksumV6(pkt1, ipHdrLen)
+        } else {
+            ChecksumUtils.setIpv4TotalLength(pkt1, pkt1Len)
+            ChecksumUtils.recalcIpv4HeaderChecksum(pkt1, ipHdrLen)
+            ChecksumUtils.recalcTcpChecksumV4(pkt1, ipHdrLen)
         }
-        recalcTcpChecksum(if (ipv6) pkt1 else pkt1, ipHdrLen, tcpHdrLen)
 
         // -- Фрагмент 2 --
         val pkt2Len = payloadOffset + frag2PayloadLen
         val pkt2 = ByteArray(pkt2Len)
         System.arraycopy(pkt, 0, pkt2, 0, payloadOffset)
         System.arraycopy(pkt, payloadOffset + frag1PayloadLen, pkt2, payloadOffset, frag2PayloadLen)
-        advanceTcpSeq(pkt2, ipHdrLen, frag1PayloadLen)
-        if (!ipv6) {
-            setIpTotalLength(pkt2, pkt2Len)
-            recalcIpChecksum(pkt2, ipHdrLen)
-        }
-        // IPv6 checksum recalc — упрощённо, используем ту же функцию (она возьмёт IPv4 pseudo-header — не идеально, но для теста)
-        // TODO v3.6: full IPv6 TCP checksum
-        if (!ipv6) {
-            recalcTcpChecksum(pkt2, ipHdrLen, tcpHdrLen)
+        ChecksumUtils.advanceTcpSeq(pkt2, ipHdrLen, frag1PayloadLen)
+        if (ipv6) {
+            ChecksumUtils.setIpv6PayloadLength(pkt2, pkt2Len - ChecksumUtils.IPV6_HEADER_LEN)
+            ChecksumUtils.recalcTcpChecksumV6(pkt2, ipHdrLen)
+        } else {
+            ChecksumUtils.setIpv4TotalLength(pkt2, pkt2Len)
+            ChecksumUtils.recalcIpv4HeaderChecksum(pkt2, ipHdrLen)
+            ChecksumUtils.recalcTcpChecksumV4(pkt2, ipHdrLen)
         }
 
         // Disorder / split order
@@ -211,65 +214,5 @@ object PacketProcessor {
 
         Log.d(TAG, "Split: frag1=$frag1PayloadLen frag2=$frag2PayloadLen disorder=$doDisorder oob=$doOob fake=$doFake ipv6=$ipv6")
         return true
-    }
-
-    // ───────────────────────────────────────────────
-    // Утилиты: работа с IP/TCP заголовками
-    // ───────────────────────────────────────────────
-
-    private fun setIpTotalLength(pkt: ByteArray, totalLen: Int) {
-        pkt[2] = ((totalLen shr 8) and 0xFF).toByte()
-        pkt[3] = (totalLen and 0xFF).toByte()
-    }
-
-    private fun advanceTcpSeq(pkt: ByteArray, ipHdrLen: Int, delta: Int) {
-        val seqOffset = ipHdrLen + 4
-        var seq = ((pkt[seqOffset].toInt() and 0xFF) shl 24) or
-                  ((pkt[seqOffset + 1].toInt() and 0xFF) shl 16) or
-                  ((pkt[seqOffset + 2].toInt() and 0xFF) shl 8) or
-                  (pkt[seqOffset + 3].toInt() and 0xFF)
-        seq = (seq + delta) and 0xFFFFFFFFL.toInt()
-        pkt[seqOffset]     = ((seq shr 24) and 0xFF).toByte()
-        pkt[seqOffset + 1] = ((seq shr 16) and 0xFF).toByte()
-        pkt[seqOffset + 2] = ((seq shr 8)  and 0xFF).toByte()
-        pkt[seqOffset + 3] = (seq and 0xFF).toByte()
-    }
-
-    private fun recalcIpChecksum(pkt: ByteArray, ipHdrLen: Int) {
-        pkt[10] = 0; pkt[11] = 0
-        val cs = internetChecksum(pkt, 0, ipHdrLen)
-        pkt[10] = ((cs shr 8) and 0xFF).toByte()
-        pkt[11] = (cs and 0xFF).toByte()
-    }
-
-    private fun recalcTcpChecksum(pkt: ByteArray, ipHdrLen: Int, tcpHdrLen: Int) {
-        val tcpOffset = ipHdrLen
-        val tcpLen = pkt.size - ipHdrLen
-        pkt[tcpOffset + 16] = 0; pkt[tcpOffset + 17] = 0
-        val pseudo = ByteArray(12 + tcpLen)
-        System.arraycopy(pkt, 12, pseudo, 0, 4)
-        System.arraycopy(pkt, 16, pseudo, 4, 4)
-        pseudo[8]  = 0
-        pseudo[9]  = 6
-        pseudo[10] = ((tcpLen shr 8) and 0xFF).toByte()
-        pseudo[11] = (tcpLen and 0xFF).toByte()
-        System.arraycopy(pkt, ipHdrLen, pseudo, 12, tcpLen)
-        val cs = internetChecksum(pseudo, 0, pseudo.size)
-        pkt[tcpOffset + 16] = ((cs shr 8) and 0xFF).toByte()
-        pkt[tcpOffset + 17] = (cs and 0xFF).toByte()
-    }
-
-    private fun internetChecksum(data: ByteArray, offset: Int, length: Int): Int {
-        var sum = 0L
-        var i = offset
-        while (i < offset + length - 1) {
-            sum += ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
-            i += 2
-        }
-        if ((offset + length) % 2 != 0) {
-            sum += (data[offset + length - 1].toInt() and 0xFF) shl 8
-        }
-        while (sum shr 16 != 0L) sum = (sum and 0xFFFF) + (sum shr 16)
-        return (sum.inv() and 0xFFFF).toInt()
     }
 }
