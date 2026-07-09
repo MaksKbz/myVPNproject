@@ -23,10 +23,14 @@ local.properties
 # NDK / CMake build artefacts
 .cxx/
 app/.cxx/
+*.o
+*.a
+*.so
 
-# Submodule build artefacts (сами субмодули отслеживаются через .gitmodules)
-app/src/main/jni/ciadpi/build/
-app/src/main/jni/tun2socks/build/
+# byedpi/badvpn — вендорены как обычные файлы (не submodule), но на всякий
+# случай игнорируем случайные build-директории внутри них
+app/src/main/jni/byedpi/build/
+app/src/main/jni/badvpn/build/
 
 # Keystore (никогда не коммитить пароль от подписи)
 *.keystore

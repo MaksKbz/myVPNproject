@@ -90,9 +90,23 @@ class BypassVpnService : VpnService(), Runnable {
     override fun run() {}
 
     /**
-     * Hybrid VPN engine v3.5 — CIS/RU optimized
-     * TUN → Kotlin PacketProcessor → Internet
-     * + native ciadpi SOCKS5 127.0.0.1:1080
+     * VPN engine v3.7 CIS-MAX.
+     *
+     * Основной путь (когда собран реальный native tun2socks —
+     * ProxyEngine.isNativeTun2socksBuilt() == true):
+     *   TUN fd → tun2socks (badvpn, читает/пишет TUN fd НАПРЯМУЮ в
+     *   нативном коде через dup()'нутый fd) → SOCKS5 127.0.0.1:1080 →
+     *   ciadpi (byedpi, TCP split/disorder/fake) → интернет.
+     *   В этом режиме Kotlin НЕ трогает TUN fd вообще — иначе два
+     *   независимых читателя одного fd (native tun2socks + Kotlin
+     *   петля) будут гоняться за одни и те же пакеты.
+     *
+     * Fallback-путь (badvpn недоступен на этапе сборки — стаб-режим):
+     *   TUN → Kotlin PacketProcessor (простая TCP-фрагментация
+     *   TLS ClientHello без полноценного TCP/IP стека) → обратно в TUN.
+     *   Это заведомо ограниченный режим для CI/разработки без NDK,
+     *   не гарантирующий реальную доставку пакетов в интернет
+     *   (см. TUN2SOCKS_AND_ECH_PLAN.md — история проблемы).
      */
     private fun runVpn(allowedApps: ArrayList<String>?) {
         try {
@@ -114,23 +128,42 @@ class BypassVpnService : VpnService(), Runnable {
                 .setMtu(1400)
                 .setBlocking(true)
 
+            // v3.7 CIS-MAX: исправлен баг self-exclusion в split-tunnel режиме.
+            // Android VpnService.Builder может иметь ЛИБО allowed-список,
+            // ЛИБО disallowed-список, но не оба одновременно — вызов
+            // addDisallowedApplication() после addAllowedApplication()
+            // бросает UnsupportedOperationException. Раньше эта ошибка
+            // молча проглатывалась в catch-блоке, из-за чего в режиме
+            // split-tunneling собственный трафик приложения (DoH-резолв,
+            // connectivity-тесты) НЕ исключался из VPN.
             if (!allowedApps.isNullOrEmpty()) {
-                Log.i(TAG, "Split tunneling for: $allowedApps")
-                for (pkg in allowedApps) {
+                // Allowed-режим: добавляем только явно выбранные пользователем
+                // пакеты. packageName сюда никогда не должен попадать (иначе
+                // собственный трафик приложения зациклится через TUN) — но
+                // на всякий случай отфильтровываем его перед добавлением.
+                val filteredApps = allowedApps.filter { it != packageName }
+                Log.i(TAG, "Split tunneling for: $filteredApps")
+                for (pkg in filteredApps) {
                     try { builder.addAllowedApplication(pkg) }
                     catch (e: Exception) { Log.w(TAG, "Skipping package: $pkg", e) }
                 }
+                // НЕ вызываем addDisallowedApplication() здесь — packageName
+                // и так не входит в allowed-список выше, значит трафик
+                // приложения не пойдёт через TUN (система маршрутизирует его
+                // как обычный трафик неразрешённого приложения).
             } else {
-                // System apps bypass — чтобы не ломать push
+                // Disallowed-режим (весь трафик через VPN, кроме исключений):
+                // System apps bypass — чтобы не ломать push, плюс
+                // самоисключение приложения — здесь оба вызова корректны,
+                // т.к. addAllowedApplication() в этой ветке не вызывался.
                 val bypass = listOf(
                     "com.google.android.gms",
                     "com.google.android.gsf",
                     "com.android.vending"
                 )
                 for (bp in bypass) { try { builder.addDisallowedApplication(bp) } catch (_: Exception) {} }
+                try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
             }
-
-            try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
 
             vpnInterface = builder.establish()
             if (vpnInterface == null) {
@@ -148,54 +181,34 @@ class BypassVpnService : VpnService(), Runnable {
                 Log.e(TAG, "ProxyEngine start failed", e)
                 false
             }
-            Log.i(TAG, "Native engine started=$nativeOk preset=$activePresetId fd=$tunFd port=${currentConfig.socksPort}")
+            val nativeTun2socksBuilt = try {
+                nativeOk && ProxyEngine.isNativeTun2socksBuilt()
+            } catch (e: Exception) {
+                Log.w(TAG, "isNativeTun2socksBuilt check failed: ${e.message}")
+                false
+            }
+            Log.i(TAG, "Native engine started=$nativeOk nativeTun2socks=$nativeTun2socksBuilt " +
+                    "preset=$activePresetId fd=$tunFd port=${currentConfig.socksPort}")
 
             startPresetMonitor()
             startAsnAutoDetect()
 
-            val input = FileInputStream(vpnInterface!!.fileDescriptor)
-            val output = FileOutputStream(vpnInterface!!.fileDescriptor)
-            val buffer = ByteBuffer.allocate(32767)
-
-            Log.i(TAG, "Starting Kotlin PacketProcessor loop — CIS optimized")
-            var packetsProcessed = 0L
-            var lastStatTime = System.currentTimeMillis()
-
-            while (isRunning) {
-                val length = try {
-                    input.read(buffer.array())
-                } catch (e: IOException) {
-                    if (isRunning) Log.e(TAG, "TUN read error", e)
-                    break
-                }
-
-                if (length > 0) {
-                    lastPacketTime = System.currentTimeMillis()
-                    val packetCopy = buffer.array().copyOf(length)
-                    val cfgSnapshot = currentConfig
-                    executorService?.submit {
-                        try {
-                            synchronized(output) {
-                                PacketProcessor.processPacket(packetCopy, length, output, cfgSnapshot)
-                            }
-                            packetsProcessed++
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error in packet loop", e)
-                        }
-                    }
-                    buffer.clear()
-
-                    val now = System.currentTimeMillis()
-                    if (now - lastStatTime > 10000) {
-                        val stats = try { PacketProcessor::class.java.getMethod("getStats").invoke(PacketProcessor) } catch (_: Exception) { "" }
-                        Log.i(TAG, "Stats: $packetsProcessed pkts $stats preset=$activePresetId")
-                        updateNotification("Пакетов: $packetsProcessed • $activePresetId")
-                        lastStatTime = now
-                    }
-                }
+            if (nativeTun2socksBuilt) {
+                // v3.7 CIS-MAX: native tun2socks (badvpn) реально читает/пишет
+                // TUN fd напрямую в C-коде (dup()'нутый fd, см.
+                // tun2socks_bridge.c). Kotlin НЕ должен параллельно трогать
+                // тот же fd — вместо packet-loop просто ждём остановки
+                // сервиса, обновляя уведомление по таймеру.
+                Log.i(TAG, "Native tun2socks active — Kotlin packet-loop disabled, TUN owned by native code")
+                runNativeIdleLoop()
+            } else {
+                // Fallback: badvpn недоступен на этапе сборки (stub-режим).
+                // Используем старый Kotlin packet-loop как best-effort —
+                // он НЕ гарантирует полноценную доставку пакетов в интернет
+                // (нет реального TCP/IP стека), см. TUN2SOCKS_AND_ECH_PLAN.md.
+                Log.w(TAG, "Native tun2socks NOT built — falling back to limited Kotlin packet-loop")
+                runKotlinPacketLoop()
             }
-
-            Log.i(TAG, "Kotlin loop finished, packets=$packetsProcessed")
 
         } catch (e: InterruptedException) {
             Log.i(TAG, "VPN thread interrupted")
@@ -206,6 +219,83 @@ class BypassVpnService : VpnService(), Runnable {
         } finally {
             stopVpn()
         }
+    }
+
+    /**
+     * Простой ожидающий цикл на время работы native tun2socks — TUN fd
+     * полностью принадлежит нативному коду (badvpn читает/пишет его
+     * напрямую через дескриптор, полученный через dup()). Здесь только
+     * периодически обновляем уведомление статистикой (packets processed
+     * недоступны из Kotlin в этом режиме — статистику см. в logcat по
+     * тегу tun2socks_jni/ciadpi_jni).
+     */
+    private fun runNativeIdleLoop() {
+        var lastNotifyTime = System.currentTimeMillis()
+        while (isRunning) {
+            try {
+                Thread.sleep(1000)
+            } catch (_: InterruptedException) {
+                break
+            }
+            val now = System.currentTimeMillis()
+            if (now - lastNotifyTime > 10000) {
+                updateNotification("Активен (native tun2socks) • $activePresetId")
+                lastNotifyTime = now
+            }
+        }
+        Log.i(TAG, "Native idle loop finished")
+    }
+
+    /**
+     * Fallback-путь для stub-сборки (badvpn недоступен). Использует
+     * старую Kotlin-фрагментацию TLS ClientHello без полноценного TCP/IP
+     * стека — заведомо ограниченный режим, см. класс-level комментарий
+     * runVpn() и TUN2SOCKS_AND_ECH_PLAN.md.
+     */
+    private fun runKotlinPacketLoop() {
+        val input = FileInputStream(vpnInterface!!.fileDescriptor)
+        val output = FileOutputStream(vpnInterface!!.fileDescriptor)
+        val buffer = ByteBuffer.allocate(32767)
+
+        Log.i(TAG, "Starting Kotlin PacketProcessor loop (fallback, stub build) — CIS optimized")
+        var packetsProcessed = 0L
+        var lastStatTime = System.currentTimeMillis()
+
+        while (isRunning) {
+            val length = try {
+                input.read(buffer.array())
+            } catch (e: IOException) {
+                if (isRunning) Log.e(TAG, "TUN read error", e)
+                break
+            }
+
+            if (length > 0) {
+                lastPacketTime = System.currentTimeMillis()
+                val packetCopy = buffer.array().copyOf(length)
+                val cfgSnapshot = currentConfig
+                executorService?.submit {
+                    try {
+                        synchronized(output) {
+                            PacketProcessor.processPacket(packetCopy, length, output, cfgSnapshot)
+                        }
+                        packetsProcessed++
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error in packet loop", e)
+                    }
+                }
+                buffer.clear()
+
+                val now = System.currentTimeMillis()
+                if (now - lastStatTime > 10000) {
+                    val stats = try { PacketProcessor::class.java.getMethod("getStats").invoke(PacketProcessor) } catch (_: Exception) { "" }
+                    Log.i(TAG, "Stats: $packetsProcessed pkts $stats preset=$activePresetId")
+                    updateNotification("Пакетов: $packetsProcessed • $activePresetId")
+                    lastStatTime = now
+                }
+            }
+        }
+
+        Log.i(TAG, "Kotlin loop finished, packets=$packetsProcessed")
     }
 
     // ===== ASN auto-detect — v3.6 CIS-MAX =====

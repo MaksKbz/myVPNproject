@@ -160,9 +160,9 @@ fun MainScreen(
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.primary
         )
-        // v3.6 CIS-MAX: IPv6 split + DoH DNS intercept + ASN-пресеты СНГ
+        // v3.7 CIS-MAX: реальный tun2socks (badvpn) + ciadpi (byedpi)
         Text(
-            text = "DPI Bypass v3.6 CIS-MAX \u2022 Kotlin + native ciadpi",
+            text = "DPI Bypass v3.7 CIS-MAX \u2022 native tun2socks + ciadpi",
             fontSize = 12.sp,
             color = Color.Gray,
             modifier = Modifier.padding(bottom = 12.dp)
@@ -376,24 +376,25 @@ fun HelpTab() {
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    "Архитектура v3.6 CIS-MAX",
+                    "Архитектура v3.7 CIS-MAX",
                     fontWeight = FontWeight.Bold, fontSize = 15.sp,
                     color = MaterialTheme.colorScheme.primary
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "TUN \u2192 PacketProcessor.kt (TCP split, IPv4+IPv6)\n" +
-                    "         + DnsInterceptor.kt (DNS\u2192DoH)\n" +
-                    "    \u2192 native ciadpi SOCKS5 127.0.0.1:1080\n\n" +
+                    "TUN \u2192 tun2socks (badvpn, native)\n" +
+                    "    \u2192 SOCKS5 127.0.0.1:1080\n" +
+                    "    \u2192 ciadpi (byedpi, native, TCP split/fake)\n" +
+                    "    \u2192 интернет\n\n" +
                     "Движок:\n" +
-                    "  \u2022 TCP фрагментация TLS ClientHello (v4 и v6)\n" +
-                    "  \u2022 QUIC/UDP 443 \u2014 дроп (fallback на TCP)\n" +
+                    "  \u2022 Полноценный TCP/IP стек (lwIP) \u2014 не только\n" +
+                    "    фрагментация TLS ClientHello, а весь TCP\n" +
+                    "  \u2022 UDP (QUIC/DNS) через SOCKS5 UDP ASSOCIATE\n" +
                     "  \u2022 Перехват UDP:53 \u2192 резолв через DoH\n" +
                     "  \u2022 Авто-определение оператора по ASN\n" +
                     "  \u2022 Пресеты СНГ: kz-telecom/mts-ru/beeline-ru/\n" +
                     "    rostelecom\n\n" +
-                    "В разработке (см. TUN2SOCKS_AND_ECH_PLAN.md):\n" +
-                    "  \u2022 tun2socks (badvpn) \u2014 нативный zero-copy\n" +
+                    "В разработке:\n" +
                     "  \u2022 ECH (Encrypted Client Hello, TLS 1.3)\n" +
                     "Детали: github.com/MaksKbz/myVPNproject",
                     fontSize = 12.sp,

@@ -1,25 +1,29 @@
-# myVPNproject v3.6.1 CIS-MAX — Android DPI Bypass
+# myVPNproject v3.7 CIS-MAX — Android DPI Bypass
 
 Android-приложение для обхода DPI-блокировок без root и без внешнего сервера.  
-Трафик перехватывается локально через TUN-интерфейс и форвардируется через нативный движок ciadpi.
+Трафик перехватывается локально через TUN-интерфейс, форвардируется полноценным
+нативным tun2socks (badvpn/lwIP) в SOCKS5, где нативный движок ciadpi (byedpi)
+делает DPI-обход (TCP split/disorder/fake).
 
 Вдохновлено проектами
 [ByeDPI (ciadpi)](https://github.com/hufrea/byedpi),
-[ByeDPIAndroid](https://github.com/dovecoteescapee/ByeDPIAndroid) и
+[ByeDPIAndroid](https://github.com/dovecoteescapee/ByeDPIAndroid),
+[badvpn/tun2socks](https://github.com/ambrop72/badvpn) и
 [Zapret](https://github.com/bol-van/zapret).
 
 ---
 
-## Архитектура v3.3.0-native
+## Архитектура v3.7 CIS-MAX
 
 ```
 Браузер/приложение
        ↓
    TUN-интерфейс (10.0.0.2/24)    ←— BypassVpnService.kt
        ↓
-  tun2socks  (badvpn, C, JNI)           ←— tun2socks_jni.so
-  Читает IP-пакеты из TUN fd,
-  устанавливает TCP-соединения через VpnService.protect()
+  tun2socks  (badvpn + lwIP, C, JNI)     ←— tun2socks_jni.so
+  Читает/пишет TUN fd НАПРЯМУЮ в нативном коде (dup()'нутый fd),
+  полноценный TCP/IP стек lwIP терминирует TCP-соединения,
+  UDP (QUIC/DNS) идёт через SOCKS5 UDP ASSOCIATE
        ↓
    SOCKS5  127.0.0.1:1080
        ↓
@@ -29,16 +33,35 @@ Android-приложение для обхода DPI-блокировок без
      Интернет
 ```
 
+**Важно (история v3.6→v3.7):** до этой версии `PacketProcessor.kt` фрагментировал
+TLS ClientHello и писал оба фрагмента **обратно в тот же TUN fd** — но у Android
+TUN-интерфейса нет автоматической маршрутизации/NAT наружу: всё, что пишется
+обратно в TUN, интерпретируется системой как **входящий** трафик для этого же
+интерфейса, а не отправляется на реальный сервер. Реальная доставка пакетов в
+интернет требует либо отдельного `protect()`-нутого сокета на каждое TCP/UDP
+соединение, либо полноценного userspace TCP/IP стека поверх такого сокета —
+именно эту роль и выполняет tun2socks (lwIP). Начиная с v3.7 это реализовано:
+`tun2socks_bridge_run()` (патч в `tun2socks.c`) принимает уже открытый TUN fd
+через `BTAP_INIT_FD` (не требует root) и полностью форвардит TCP через lwIP →
+`BSocksClient` → SOCKS5, а UDP — через `SocksUdpClient` UDP ASSOCIATE.
+Путь TUN → lwIP → SOCKS5 → обратно протестирован E2E на Linux (реальный TUN +
+тестовый SOCKS5-сервер) в рамках разработки.
+
+Пока native tun2socks активен, Kotlin **не читает TUN fd** — старый
+`PacketProcessor`-цикл остаётся только как fallback для stub-сборки без badvpn
+(см. `ProxyEngine.isNativeTun2socksBuilt()`).
+
 ### Компоненты
 
 | Компонент | Роль |
 |---|---|
-| `BypassVpnService.kt` | TUN-интерфейс, foreground service, передаёт `tunFd` в `ProxyEngine` |
-| `ProxyEngine.kt` | Kotlin JNI-мост: запуск ciadpi → tun2socks |
-| `ciadpi_jni.c` | C JNI-мост для byedpi (stub → реальный после submodule) |
-| `tun2socks_jni.c` | C JNI-мост для badvpn/tun2socks (stub → реальный) |
+| `BypassVpnService.kt` | TUN-интерфейс, foreground service, передаёт `tunFd` в `ProxyEngine`; выбирает native/fallback путь |
+| `ProxyEngine.kt` | Kotlin JNI-мост: запуск ciadpi → tun2socks, `isNativeTun2socksBuilt()` |
+| `ciadpi_jni.c` | C JNI-мост для byedpi (реальный, vendored, не submodule) |
+| `tun2socks_jni.c` | C JNI-мост для badvpn/tun2socks (реальный, vendored) |
+| `badvpn/tun2socks/tun2socks_bridge.h` | Библиотечный API поверх апстримного tun2socks.c (принимает открытый fd вместо CLI) |
 | `ConfigManager.kt` | Пресеты (включая СНГ: kz-telecom/mts-ru/beeline-ru/rostelecom), JSON-сериализация конфигурации |
-| `PacketProcessor.kt` | TCP split TLS ClientHello (IPv4 + IPv6), делегирует DNS в `DnsInterceptor` |
+| `PacketProcessor.kt` | Fallback-путь (stub-сборка без badvpn): TCP split TLS ClientHello (IPv4 + IPv6) |
 | `DnsInterceptor.kt` | Перехват UDP:53 на уровне TUN → резолв через `DohResolver` → синтез DNS-ответа |
 | `DohResolver.kt` | DoH-клиент на чистом `HttpsURLConnection`/`org.json` (без внешних зависимостей) |
 | `NetworkProfileDetector.kt` | Авто-определение оператора СНГ по ASN (ip-api.com через `protect()`-сокет) |
@@ -61,38 +84,26 @@ Android-приложение для обхода DPI-блокировок без
 | `beeline-ru` | Билайн (РФ) | Блокировки под Билайн |
 | `rostelecom` | Ростелеком (РФ) | Блокировки под ТСПУ Ростелекома |
 
-
 ---
 
 ## Сборка
 
-### Stub-режим (без submodule)
+byedpi и badvpn/tun2socks/lwIP **вендорены прямо в репозиторий** (не submodule) —
+достаточно обычного клона:
 
 ```bash
 git clone https://github.com/MaksKbz/myVPNproject.git
 cd myVPNproject
-git checkout feature/native-engine
 ./gradlew assembleDebug
 ```
 
-APK собирается. VPN-туннель поднимается, но DPI-обход ещё не активен — stub.
-
-### Полная активация (byedpi + badvpn)
-
-```bash
-# 1. Добавить submodule-ы
-git submodule add https://github.com/hufrea/byedpi.git \
-  app/src/main/jni/byedpi
-git submodule add https://github.com/ambrop72/badvpn.git \
-  app/src/main/jni/badvpn
-git submodule update --init --recursive
-
-# 2. Раскомментировать #include в ciadpi_jni.c и tun2socks_jni.c
-#    (см. NATIVE_ENGINE_SETUP.md)
-
-# 3. Собрать
-./gradlew assembleDebug
-```
+Собранный APK содержит реальный DPI-обход (ciadpi) и реальный TUN→SOCKS5
+форвардинг (tun2socks) — не stub. Если badvpn-исходники по какой-то причине
+отсутствуют в дереве (`app/src/main/jni/badvpn/tun2socks/tun2socks.c` не
+найден), CMake автоматически переключается в safety-fallback: `tun2socks_jni.so`
+собирается без реального badvpn, а `BypassVpnService` использует
+Kotlin `PacketProcessor`-цикл как fallback (см. предупреждение выше про его
+ограничения).
 
 ### Требования
 
@@ -105,29 +116,32 @@ git submodule update --init --recursive
 
 ## CI / GitHub Actions
 
-Автоматическая сборка Debug APK при каждом push в `master` и `feature/native-engine`.  
-Степы: checkout (submodules:recursive) → JDK 17 → NDK 27 → Gradle → assembleDebug → upload artifact.
+Автоматическая сборка Debug APK при каждом push в `master`.  
+Степы: checkout → JDK 17 → NDK 27 → Gradle → assembleDebug → upload artifact.
 
 Artifact доступен в разделе [Actions](https://github.com/MaksKbz/myVPNproject/actions).
 
 ---
 
-## Дорожная карта v3.6 CIS-MAX
+## Дорожная карта v3.7 CIS-MAX
 
-- [x] Kotlin userspace TCP split (v3.2.0)
-- [x] JNI каркас: CMake + ciadpi_jni + tun2socks_jni + ProxyEngine.kt (v3.3.0-native)
+- [x] Kotlin userspace TCP split (v3.2.0, теперь fallback-путь)
 - [x] byedpi vendored (не submodule) — ciadpi_jni.c реально вызывает `run()` из byedpi/proxy.c
 - [x] IPv6 TCP split — полностью реализован (ChecksumUtils, PacketProcessor, юнит-тесты)
-- [x] DoH-клиент — перехват UDP:53 на уровне TUN + резолв через DoH (DnsInterceptor.kt),
-      а не просто список DoH-совместимых DNS-серверов
+- [x] DoH-клиент — перехват UDP:53 на уровне TUN + резолв через DoH (DnsInterceptor.kt)
 - [x] Пресеты СНГ: `kz-telecom`, `mts-ru`, `beeline-ru`, `rostelecom` + авто-определение
       оператора по ASN (NetworkProfileDetector.kt, ip-api.com через protect()-сокет)
-- [ ] tun2socks (badvpn) — всё ещё stub. Требует патча `--tunfd` в badvpn или
-      полного JNI-рефакторинга с портированием lwIP под Bionic.
-      См. подробный план: [`TUN2SOCKS_AND_ECH_PLAN.md`](./TUN2SOCKS_AND_ECH_PLAN.md)
+- [x] **tun2socks (badvpn) — реализован и E2E-протестирован.** Патч `TUN2SOCKS_LIBRARY_MODE`
+      в `tun2socks.c` добавляет `tun2socks_bridge_run()/stop()`, принимающие уже
+      открытый TUN fd через `BTAP_INIT_FD` (root не требуется). Полноценный lwIP
+      TCP/IP стек + SOCKS5 UDP ASSOCIATE для UDP (QUIC/DNS).
 - [ ] ECH (Encrypted Client Hello) — требует сборки BoringSSL с ECH под NDK
-      и локального TLS-терминирующего прокси. См. тот же план-документ.
-- [ ] Полное E2E-тестирование на реальном устройстве (Алматы / РФ)
+      и локального TLS-терминирующего прокси. См. [`TUN2SOCKS_AND_ECH_PLAN.md`](./TUN2SOCKS_AND_ECH_PLAN.md).
+- [ ] Полное E2E-тестирование на реальном устройстве (Алматы / РФ) — тестовая
+      сборка проверена на Linux x86_64 (TUN + фейковый SOCKS5-сервер), но не
+      на реальном Android-устройстве с настоящим оператором СНГ.
+- [ ] IPv6 destinations в ciadpi (params.ipv6) — сейчас baddr только AF_INET,
+      IPv6-назначения (S_ATP_I6) отклоняются на уровне remote_sock().
 
 ---
 
@@ -137,4 +151,4 @@ Artifact доступен в разделе [Actions](https://github.com/MaksKbz
 - [ByeDPIAndroid](https://github.com/dovecoteescapee/ByeDPIAndroid) — Android-реализация ciadpi
 - [badvpn/tun2socks](https://github.com/ambrop72/badvpn) — TUN → SOCKS5 прокси
 - [Zapret](https://github.com/bol-van/zapret) — альтернативный DPI-обход
-- [NATIVE_ENGINE_SETUP.md](./NATIVE_ENGINE_SETUP.md) — инструкция активации
+- [NATIVE_ENGINE_SETUP.md](./NATIVE_ENGINE_SETUP.md) — историческая инструкция активации (устарела с v3.7 — сборка теперь не требует ручных шагов)

@@ -42,8 +42,20 @@ static void init_params(const JniConfig *cfg) {
 
     params.mode      = MODE_SOCKS5;
     params.resolve   = true;
+    // IPv6 destinations намеренно оставлены выключенными: params.baddr
+    // ниже — AF_INET/INADDR_ANY, а remote_sock()/map_fix() в proxy.c
+    // отклоняют соединения, если семейство адреса назначения не совпадает
+    // с семейством baddr (не v4-mapped IPv6 просто вернёт -1). Включать
+    // params.ipv6 без отдельного IPv6 baddr бессмысленно и только тратит
+    // round-trip на заведомо неудачные попытки — оставляем как отдельную
+    // будущую задачу (нужен dual-stack baddr).
     params.ipv6      = false;
-    params.udp       = false;
+    // v3.7 CIS-MAX: включаем SOCKS5 UDP ASSOCIATE — начиная с этой версии
+    // tun2socks (badvpn) реально форвардит QUIC/DNS-over-UDP через
+    // SocksUdpClient (см. tun2socks_bridge_run(): cfg.socks5_udp=1). Без
+    // params.udp=true byedpi отклонял бы S_CMD_AUDP запрос, и весь UDP
+    // трафик из TUN молча бы отваливался на этапе SOCKS5-хендшейка.
+    params.udp       = true;
     params.max_open  = 512;
     params.bfsize    = 16384;
     params.debug     = 0;
