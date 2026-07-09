@@ -14,8 +14,8 @@ android {
         applicationId = "com.makskbz.myvpnproject"
         minSdk = 24
         targetSdk = 35
-        versionCode = 18
-        versionName = "3.7.0-cis-max-tun2socks"
+        versionCode = 19
+        versionName = "3.7.1-cis-max-ipv6"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
 

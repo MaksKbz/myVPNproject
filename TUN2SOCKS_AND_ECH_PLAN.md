@@ -91,27 +91,29 @@ Android-устройстве/эмуляторе. Компиляция под Bio
 
 ### 1.4 Известные ограничения после этой реализации
 
-- **IPv6 в ciadpi**: `params.ipv6 = false` (см. `ciadpi_jni.c`) —
-  `params.baddr` настроен только на `AF_INET`, а `remote_sock()`/`map_fix()`
-  в byedpi/proxy.c отклоняют попытки подключения к IPv6-адресатам, если
-  семейство не совпадает с `baddr`. Нужен dual-stack `baddr` для полной
-  поддержки IPv6-назначений через SOCKS5 (`S_ATP_I6`). Не блокирует
-  IPv4-трафик (подавляющее большинство сайтов СНГ).
+- ~~**IPv6 в ciadpi**: `params.ipv6 = false`~~ — **исправлено**. `ciadpi_jni.c`
+  теперь настраивает `params.baddr` как dual-stack (`AF_INET6` +
+  `in6addr_any`), `params.ipv6 = true`. `remote_sock()` в byedpi/proxy.c сам
+  включает `IPV6_V6ONLY=0` на сокете назначения, когда семейство адреса
+  назначения `AF_INET6` — этого достаточно, чтобы один и тот же baddr
+  одинаково обслуживал и v4-mapped-v6 адреса (`map_fix(dst,6)` преобразует
+  в них чистый IPv4 dst), и нативные IPv6-адреса. Проверено локально
+  функциональным тестом, воспроизводящим точную логику `remote_sock()`/
+  `map_fix()`: dual-stack сокет успешно подключается к обоим типам
+  назначений и передаёт данные в обе стороны.
 - **UDP fragmentation/MTU**: `tun2socks_bridge_run()` использует MTU=1500 по
   умолчанию; для мобильных сетей (LTE с меньшим MTU из-за инкапсуляции)
   может потребоваться подстройка — не протестировано на реальной мобильной
   сети.
-- **Split-tunnel self-exclusion bug** (найден при ревизии, не устранён в
-  этой сессии): в `BypassVpnService.runVpn()`, когда `allowedApps` не пуст,
-  вызывается `addAllowedApplication()`, а затем всё равно
-  `addDisallowedApplication(packageName)` — Android бросает
-  `UnsupportedOperationException` («Builder может иметь только allowed ИЛИ
-  disallowed список, не оба»), которая молча проглатывается. Значит в
-  режиме split-tunneling собственный трафик приложения (DoH-резолв,
-  connectivity-тесты) не исключается из VPN и потенциально зацикливается.
-  Нужно почитать: если `allowedApps` заполнен и не содержит `packageName`,
-  self-exclusion не нужна (achieved automatically), либо нужно откатиться на
-  disallowed-режим с явным включением `packageName` в bypass-список.
+- ~~**Split-tunnel self-exclusion bug**~~ — **исправлено**. В
+  `BypassVpnService.runVpn()` раньше при непустом `allowedApps` вызывался
+  `addAllowedApplication()`, а затем всё равно `addDisallowedApplication(
+  packageName)` — Android бросал `UnsupportedOperationException` («Builder
+  может иметь только allowed ИЛИ disallowed список, не оба»), которая молча
+  проглатывалась. Теперь в allowed-режиме `addDisallowedApplication()` не
+  вызывается вообще (`packageName` просто не входит в отфильтрованный
+  allowed-список), а в disallowed-режиме (`allowedApps` пуст) оба вызова
+  корректны, т.к. `addAllowedApplication()` в этой ветке не используется.
 
 ---
 
@@ -168,12 +170,14 @@ PacketProcessor), а полноценная HPKE-операция:
 
 ### 2.3 Рекомендация
 
-Теперь, когда tun2socks (п.1) реализован и E2E-протестирован, следующим
+tun2socks (п.1), split-tunnel self-exclusion и IPv6 в ciadpi уже реализованы
+и E2E-протестированы (в разной степени — см. таблицу ниже). Следующим
 логичным шагом перед ECH является:
-1. Реальная сборка через Android NDK + прогон на устройстве/эмуляторе —
-   подтвердить, что путь работает не только на Linux x86_64.
-2. Устранение split-tunnel self-exclusion бага (см. 1.4).
-3. Только затем — отдельная ветка `feature/ech` с CI-джобой, которая явно
+1. Реальная сборка через Android NDK (подтверждена зелёным CI-прогоном на
+   GitHub Actions) + ручной прогон на реальном устройстве/эмуляторе —
+   подтвердить, что путь работает не только на Linux x86_64 и в CI, но и
+   при реальном использовании конечным пользователем.
+2. Только затем — отдельная ветка `feature/ech` с CI-джобой, которая явно
    собирает BoringSSL (добавит 10-15 минут к каждому CI-прогону,
    нежелательно мешать с основной веткой, пока не стабилизировано).
 
@@ -183,10 +187,10 @@ PacketProcessor), а полноценная HPKE-операция:
 
 | Пункт roadmap | Статус | Что осталось |
 |---|---|---|
-| tun2socks native | ✅ Реализовано и E2E-протестировано на Linux | Сборка через реальный Android NDK + тест на устройстве |
+| tun2socks native | ✅ Реализовано, E2E-протестировано на Linux, зелёный CI на Android NDK | Ручной тест на реальном устройстве |
 | ECH | План задокументирован | Сборка BoringSSL-ECH под NDK, JNI-обёртка, HTTPS/SVCB-парсинг в DohResolver — отдельный релиз v4.0 |
 | IPv6 TCP split (Kotlin fallback) | ✅ Сделано | — |
 | DoH-клиент (перехват DNS) | ✅ Сделано (DnsInterceptor.kt) | — |
 | Пресеты СНГ + ASN автоопределение | ✅ Сделано | Ручная калибровка TTL под реальные измерения в полевых условиях |
-| IPv6 в ciadpi SOCKS5 назначениях | ⏳ Не реализовано | Dual-stack baddr в byedpi |
-| Split-tunnel self-exclusion bug | ⏳ Найден, не исправлен | См. п.1.4 |
+| IPv6 в ciadpi SOCKS5 назначениях | ✅ Сделано (dual-stack baddr), проверено функциональным тестом | — |
+| Split-tunnel self-exclusion bug | ✅ Исправлено | — |

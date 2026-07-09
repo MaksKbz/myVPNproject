@@ -135,13 +135,19 @@ Artifact доступен в разделе [Actions](https://github.com/MaksKbz
       в `tun2socks.c` добавляет `tun2socks_bridge_run()/stop()`, принимающие уже
       открытый TUN fd через `BTAP_INIT_FD` (root не требуется). Полноценный lwIP
       TCP/IP стек + SOCKS5 UDP ASSOCIATE для UDP (QUIC/DNS).
+- [x] **IPv6 destinations в ciadpi** — `params.baddr` переведён на dual-stack
+      (`AF_INET6` + `in6addr_any`, `IPV6_V6ONLY=0` для сокетов назначения
+      AF_INET6), `params.ipv6 = true`. Раньше `baddr` был чистым `AF_INET`,
+      и `remote_sock()`/`map_fix()` отклоняли любое подключение к IPv6-адресу
+      назначения (`S_ATP_I6` от tun2socks). Функционально проверено локально:
+      dual-stack сокет успешно подключается и к v4-mapped-v6, и к нативным
+      IPv6-адресам одновременно.
 - [ ] ECH (Encrypted Client Hello) — требует сборки BoringSSL с ECH под NDK
       и локального TLS-терминирующего прокси. См. [`TUN2SOCKS_AND_ECH_PLAN.md`](./TUN2SOCKS_AND_ECH_PLAN.md).
 - [ ] Полное E2E-тестирование на реальном устройстве (Алматы / РФ) — тестовая
       сборка проверена на Linux x86_64 (TUN + фейковый SOCKS5-сервер), но не
       на реальном Android-устройстве с настоящим оператором СНГ.
-- [ ] IPv6 destinations в ciadpi (params.ipv6) — сейчас baddr только AF_INET,
-      IPv6-назначения (S_ATP_I6) отклоняются на уровне remote_sock().
+
 
 ---
 

@@ -42,14 +42,18 @@ static void init_params(const JniConfig *cfg) {
 
     params.mode      = MODE_SOCKS5;
     params.resolve   = true;
-    // IPv6 destinations намеренно оставлены выключенными: params.baddr
-    // ниже — AF_INET/INADDR_ANY, а remote_sock()/map_fix() в proxy.c
-    // отклоняют соединения, если семейство адреса назначения не совпадает
-    // с семейством baddr (не v4-mapped IPv6 просто вернёт -1). Включать
-    // params.ipv6 без отдельного IPv6 baddr бессмысленно и только тратит
-    // round-trip на заведомо неудачные попытки — оставляем как отдельную
-    // будущую задачу (нужен dual-stack baddr).
-    params.ipv6      = false;
+    // v3.7.1: IPv6 destinations включены через dual-stack baddr (см. ниже).
+    // Раньше params.ipv6=false, а params.baddr был чистым AF_INET —
+    // remote_sock()/map_fix() в proxy.c отклоняли любое соединение, если
+    // семейство адреса назначения не совпадало с семейством baddr, то
+    // есть все IPv6-адресаты (S_ATP_I6 от tun2socks) молча проваливались
+    // на уровне SOCKS5 (-S_ER_ATP). Протестировано локально (Linux
+    // x86_64, gcc): dual-stack AF_INET6-сокет с IPV6_V6ONLY=0, привязанный
+    // к in6addr_any, успешно коннектится как к v4-mapped-v6 адресам
+    // (::ffff:a.b.c.d — именно так map_fix(dst,6) конвертирует чистый
+    // IPv4 dst, когда params.baddr.sa_family==AF_INET6), так и к нативным
+    // IPv6-адресам — то есть один и тот же baddr обслуживает оба случая.
+    params.ipv6      = true;
     // v3.7 CIS-MAX: включаем SOCKS5 UDP ASSOCIATE — начиная с этой версии
     // tun2socks (badvpn) реально форвардит QUIC/DNS-over-UDP через
     // SocksUdpClient (см. tun2socks_bridge_run(): cfg.socks5_udp=1). Без
@@ -60,9 +64,17 @@ static void init_params(const JniConfig *cfg) {
     params.bfsize    = 16384;
     params.debug     = 0;
 
-    params.baddr.in.sin_family      = AF_INET;
-    params.baddr.in.sin_addr.s_addr = INADDR_ANY;
-    params.baddr.in.sin_port        = 0;
+    // Dual-stack baddr: AF_INET6 + in6addr_any. remote_sock() в proxy.c
+    // создаёт отдельный сокет под каждое исходящее соединение и сам
+    // включает IPV6_V6ONLY=0 на нём, когда семейство адреса назначения
+    // AF_INET6 (см. `if (dst->sa.sa_family == AF_INET6) setsockopt(...
+    // IPV6_V6ONLY, &no ...)` в proxy.c) — этого достаточно, чтобы такой
+    // сокет одинаково успешно подключался и к v4-mapped-v6, и к чистым
+    // v6 адресам, при этом bind() на params.baddr (AF_INET6/::) не
+    // конфликтует ни с тем, ни с другим семейством назначения.
+    params.baddr.in6.sin6_family = AF_INET6;
+    params.baddr.in6.sin6_addr   = in6addr_any;
+    params.baddr.in6.sin6_port   = 0;
 
     params.dp = (struct desync_params *)calloc(1, sizeof(struct desync_params));
     if (!params.dp) { LOGE("OOM: desync_params"); return; }
