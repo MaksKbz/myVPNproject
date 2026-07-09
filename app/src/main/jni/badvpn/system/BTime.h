@@ -73,7 +73,18 @@ extern struct _BTime_global btime_global;
 
 static void BTime_Init (void)
 {
-    ASSERT(!btime_global.initialized)
+    /* v3.7.2 CIS-MAX (myVPNproject fix): апстримный ASSERT(!initialized)
+     * здесь падал (abort() -> убивал весь процесс приложения) при
+     * повторном вызове BTime_Init() — что происходит каждый раз, когда
+     * Android-приложение перезапускает tun2socks_bridge_run() (ASN
+     * auto-detect, авто-переключение пресета). Тело функции идемпотентно
+     * по своей природе (просто фиксирует "время старта" для относительных
+     * таймеров) — повторный вызов безопасен, просто игнорируем его. */
+    #ifndef NDEBUG
+    if (btime_global.initialized) {
+        return;
+    }
+    #endif
     
     #if defined(BADVPN_USE_WINAPI)
     

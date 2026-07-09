@@ -51,8 +51,20 @@ int bnetwork_initialized = 0;
 
 int BNetwork_GlobalInit (void)
 {
-    ASSERT(!bnetwork_initialized)
-    
+    /* v3.7.2 CIS-MAX (myVPNproject fix): апстримный код здесь имел
+     * ASSERT(!bnetwork_initialized), из-за чего ПОВТОРНЫЙ вызов
+     * BNetwork_GlobalInit() (например, когда Android-приложение
+     * останавливает и заново запускает tun2socks_bridge_run() —
+     * ASN auto-detect, авто-переключение пресета, ручной рестарт)
+     * приводил к abort() и убивал ВЕСЬ процесс приложения (SIGABRT),
+     * а не просто кидал Kotlin-исключение. Само тело функции
+     * идемпотентно по своей природе (SIGPIPE в игнор / WSAStartup) —
+     * повторный вызов безопасен и не нужен, поэтому просто возвращаем
+     * успех, если уже инициализировано, вместо падения по ASSERT. */
+    if (bnetwork_initialized) {
+        return 1;
+    }
+
 #ifdef BADVPN_USE_WINAPI
     
     WORD requested = MAKEWORD(2, 2);
