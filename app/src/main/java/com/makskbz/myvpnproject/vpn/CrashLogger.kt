@@ -97,7 +97,10 @@ object CrashLogger {
     // останавливать VPN без единого краша) — при превышении просто
     // обрезаем файл и начинаем заново, самое важное всё равно последние
     // записи перед крахом.
-    private const val MAX_CHECKPOINT_FILE_SIZE = 64 * 1024L
+    // v3.7.7: увеличено с 64KB — теперь есть быстрый (4 записи/сек)
+    // мониторинг памяти в BypassVpnService.startFastMemoryWatch(),
+    // который иначе исчерпывал бы старый лимит за ~100 секунд работы.
+    private const val MAX_CHECKPOINT_FILE_SIZE = 256 * 1024L
 
     fun checkpoint(context: Context, tag: String) {
         try {

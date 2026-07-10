@@ -267,7 +267,7 @@ fun MainScreen(
                         // важное (последний живой шаг перед крахом) всегда
                         // в конце текста. Кнопка "Копировать" всё равно
                         // копирует полный текст без обрезки.
-                        combined.takeLast(4000),
+                        combined.takeLast(8000),
                         fontSize = 10.sp,
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                         color = Color(0xFF4E342E),

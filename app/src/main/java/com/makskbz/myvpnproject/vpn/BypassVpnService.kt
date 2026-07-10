@@ -1,5 +1,6 @@
 package com.makskbz.myvpnproject.vpn
 
+import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
+import android.os.Debug
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -76,7 +78,61 @@ class BypassVpnService : VpnService(), Runnable {
         }
         executorService = Executors.newCachedThreadPool()
         vpnThread = Thread({ runVpn(allowedApps) }, "BypassVpnThread").apply { start() }
+        startFastMemoryWatch()
         Log.i(TAG, "VPN service v3.5-hybrid started. Preset: $activePresetId")
+    }
+
+    // v3.7.7 CIS-MAX: предыдущий checkpoint-лог показал, что процесс
+    // умирает МЕНЕЕ ЧЕМ ЗА СЕКУНДУ после входа в runNativeIdleLoop() —
+    // раньше, чем успевают сработать чекпоинты tick=1 (через ~1000ms) и
+    // AsnAutoDetect: вызываем detect() (через ~1500ms). Это исключает ASN
+    // auto-detect как причину и указывает на сам нативный tun2socks/ciadpi
+    // под ПЕРВОЙ ВОЛНОЙ реального трафика устройства (addRoute("0.0.0.0",0)
+    // + addRoute("::",0) означают, что ВЕСЬ трафик телефона — десятки
+    // фоновых приложений и системных сервисов одновременно — мгновенно
+    // пошёл через TUN, в отличие от синтетического E2E-теста с одним
+    // TCP-соединением). Наиболее вероятная причина такого профиля —
+    // Android Low Memory Killer (cgroup OOM), который тоже посылает
+    // SIGKILL напрямую, БЕЗ гарантированного вызова onLowMemory()/
+    // onTrimMemory() ДО самого убийства (это лишь заблаговременные
+    // предупреждения, не гарантия). Быстрый (250мс) независимый поток
+    // логирует реальное потребление памяти, чтобы подтвердить/опровергнуть
+    // эту гипотезу за то же самое окно жизни процесса.
+    private fun startFastMemoryWatch() {
+        Thread({
+            try {
+                val am = getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+                var tick = 0
+                while (isRunning) {
+                    tick++
+                    val nativeHeap = Debug.getNativeHeapAllocatedSize() / 1024
+                    val runtime = Runtime.getRuntime()
+                    val jvmUsedKb = (runtime.totalMemory() - runtime.freeMemory()) / 1024
+                    val memInfo = ActivityManager.MemoryInfo()
+                    am?.getMemoryInfo(memInfo)
+                    // v3.7.7: количество открытых файловых дескрипторов процесса —
+                    // SocksUdpClient/BSocksClient открывают новый сокет НА КАЖДОЕ
+                    // соединение; при реальной нагрузке (десятки одновременных
+                    // системных сервисов/приложений через TUN) возможно
+                    // исчерпание лимита fd (RLIMIT_NOFILE), что тоже приводит к
+                    // abort()/SIGSEGV в нативном коде при попытке открыть ещё один.
+                    val fdCount = try {
+                        java.io.File("/proc/self/fd").list()?.size ?: -1
+                    } catch (_: Exception) { -1 }
+                    CrashLogger.checkpoint(
+                        this,
+                        "mem-watch #$tick: nativeHeapKb=$nativeHeap jvmUsedKb=$jvmUsedKb " +
+                                "systemAvailKb=${memInfo.availMem / 1024} systemLowMemory=${memInfo.lowMemory} " +
+                                "systemThresholdKb=${memInfo.threshold / 1024} openFds=$fdCount"
+                    )
+                    Thread.sleep(250)
+                }
+            } catch (_: InterruptedException) {
+                // сервис остановлен — нормально
+            } catch (e: Throwable) {
+                CrashLogger.checkpoint(this, "mem-watch: FATAL ${e.javaClass.name}: ${e.message}")
+            }
+        }, "FastMemoryWatch").apply { isDaemon = true; start() }
     }
 
     private fun stopVpn() {
