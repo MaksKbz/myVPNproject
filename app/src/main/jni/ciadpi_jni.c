@@ -10,6 +10,7 @@
 #include "byedpi/proxy.h"
 #include "byedpi/params.h"
 #include "byedpi/packets.h"
+#include "crash_handler.h"
 
 #define LOG_TAG "ciadpi_jni"
 #define LOGI(...)  __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -124,8 +125,10 @@ static void *ciadpi_thread(void *arg) {
     JniConfig *cfg = (JniConfig *)arg;
     LOGI("ciadpi starting on SOCKS5 127.0.0.1:%d split=%d disorder=%d fake=%d",
          cfg->socks_port, cfg->split_pos, cfg->disorder, cfg->fake_enabled);
+    crash_log_checkpoint("ciadpi_thread: entered");
 
     init_params(cfg);
+    crash_log_checkpoint("ciadpi_thread: init_params done");
 
     union sockaddr_u srv;
     memset(&srv, 0, sizeof(srv));
@@ -133,8 +136,10 @@ static void *ciadpi_thread(void *arg) {
     srv.in.sin_port        = htons((uint16_t)cfg->socks_port);
     srv.in.sin_addr.s_addr = inet_addr("127.0.0.1");
 
+    crash_log_checkpoint("ciadpi_thread: calling run()");
     int rc = run(&srv);
     LOGI("ciadpi run() returned %d", rc);
+    crash_log_checkpoint("ciadpi_thread: run() returned");
 
     cleanup_params();
     g_running = 0;
@@ -194,4 +199,26 @@ Java_com_makskbz_myvpnproject_vpn_ProxyEngine_ciadpiVersion(
 {
     (void)thiz;
     return (*env)->NewStringUTF(env, "byedpi/vendored");
+}
+
+/*
+ * v3.7.3 CIS-MAX: устанавливает нативный сборщик крашей (SIGABRT/SIGSEGV/...)
+ * — пишет диагностику в файл внутри filesDir приложения, чтобы можно было
+ * увидеть причину краша прямо в UI на устройстве без adb logcat. Вызывается
+ * из ProxyEngine.<init> при первой загрузке нативных библиотек — до любого
+ * реального запуска ciadpi/tun2socks.
+ */
+JNIEXPORT void JNICALL
+Java_com_makskbz_myvpnproject_vpn_ProxyEngine_installCrashHandler(
+        JNIEnv *env,
+        jobject thiz,
+        jstring logPath)
+{
+    (void)thiz;
+    const char *path = (*env)->GetStringUTFChars(env, logPath, NULL);
+    if (path) {
+        crash_handler_install(path);
+        crash_log_checkpoint("ciadpi_jni: crash handler installed");
+        (*env)->ReleaseStringUTFChars(env, logPath, path);
+    }
 }

@@ -15,8 +15,12 @@ else()
 endif()
 
 # ── ciadpi_jni.so — ALWAYS real (byedpi vendored) ───────────────
+# v3.7.3 CIS-MAX: crash_handler.c добавлен в оба .so-модуля — минимальный
+# сборщик нативных крашей (SIGABRT/SIGSEGV/...) для отладки на устройствах
+# без adb logcat (см. crash_handler.h/.c).
 add_library(ciadpi_jni SHARED
     ciadpi_jni.c
+    crash_handler.c
     byedpi/proxy.c
     byedpi/desync.c
     byedpi/extend.c
@@ -37,7 +41,7 @@ target_compile_options(ciadpi_jni PRIVATE -O2 -Wall -fvisibility=hidden)
 target_link_libraries(ciadpi_jni android log)
 
 # ── tun2socks_jni.so — stub or real (badvpn) ─────────────────────
-add_library(tun2socks_jni SHARED tun2socks_jni.c)
+add_library(tun2socks_jni SHARED tun2socks_jni.c crash_handler.c)
 target_include_directories(tun2socks_jni PRIVATE ${CMAKE_SOURCE_DIR})
 
 if(BADVPN_AVAILABLE)

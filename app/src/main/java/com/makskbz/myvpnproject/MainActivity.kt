@@ -1,6 +1,9 @@
 package com.makskbz.myvpnproject
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
@@ -26,7 +29,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.makskbz.myvpnproject.vpn.BypassVpnService
 import com.makskbz.myvpnproject.vpn.ConfigManager
+import com.makskbz.myvpnproject.vpn.CrashLogger
 import com.makskbz.myvpnproject.vpn.PRESETS
+import com.makskbz.myvpnproject.vpn.ProxyEngine
 
 data class AppItem(val name: String, val packageName: String)
 
@@ -39,6 +44,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // v3.7.3 CIS-MAX: устанавливаем сборщик крашей (Kotlin + нативный
+        // SIGABRT/SIGSEGV/...) КАК МОЖНО РАНЬШЕ — до любых других вызовов,
+        // чтобы даже краш при самом первом нажатии "Запустить VPN" был
+        // перехвачен и сохранён на диск. Это позволяет диагностировать
+        // краши на устройствах без доступа к `adb logcat` — пользователь
+        // видит причину прямо в приложении (вкладка "Справка" ниже).
+        CrashLogger.install(this)
+        ProxyEngine.installCrashHandler(this)
 
         // Исправление #1 (КРИТИЧЕСКОЕ): запрашиваем POST_NOTIFICATIONS на Android 13+
         // Без этого foreground-уведомление не появится и система может убить сервис.
@@ -58,6 +72,12 @@ class MainActivity : ComponentActivity() {
 
         val installedApps = getInstalledAppsList()
 
+        // Читаем логи прошлого краша (если приложение вылетело в предыдущем
+        // запуске) — показываем их пользователю прямо в UI, чтобы не нужен
+        // был adb. Копируем в переменные ДО clearAll(), иначе покажем пустоту.
+        val javaCrash = CrashLogger.readJavaCrashLog(this)
+        val nativeCrash = CrashLogger.readNativeCrashLog(this)
+
         setContent {
             MaterialTheme {
                 Surface(
@@ -75,10 +95,23 @@ class MainActivity : ComponentActivity() {
                             val cfg = ConfigManager.loadPreset(presetId)
                                 .copy(allowedApps = selectedPackages.toList())
                             ConfigManager.saveConfig(this, cfg)
-                        }
+                        },
+                        javaCrashLog     = javaCrash,
+                        nativeCrashLog   = nativeCrash,
+                        onClearCrashLogs = { CrashLogger.clearAll(this) },
+                        onCopyToClipboard = { text -> copyToClipboard(text) }
                     )
                 }
             }
+        }
+    }
+
+    private fun copyToClipboard(text: String) {
+        try {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("crash_log", text))
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Clipboard copy failed", e)
         }
     }
 
@@ -143,10 +176,15 @@ fun MainScreen(
     selectedPresetId: MutableState<String>,
     onStartVpn: () -> Unit,
     onStopVpn: () -> Unit,
-    onSaveConfig: (String) -> Unit
+    onSaveConfig: (String) -> Unit,
+    javaCrashLog: String? = null,
+    nativeCrashLog: String? = null,
+    onClearCrashLogs: () -> Unit = {},
+    onCopyToClipboard: (String) -> Unit = {}
 ) {
     var isRunning by remember { mutableStateOf(false) }
     var tabIndex  by remember { mutableStateOf(0) }
+    var crashLogsDismissed by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -167,6 +205,59 @@ fun MainScreen(
             color = Color.Gray,
             modifier = Modifier.padding(bottom = 12.dp)
         )
+
+        // v3.7.3 CIS-MAX: если в прошлом запуске приложение упало (Kotlin
+        // исключение ИЛИ нативный сигнал SIGABRT/SIGSEGV/...), показываем
+        // причину прямо здесь — самое заметное место экрана, чтобы
+        // пользователь мог скопировать текст и прислать разработчику без
+        // необходимости в adb logcat.
+        val hasCrashLog = (!javaCrashLog.isNullOrBlank() || !nativeCrashLog.isNullOrBlank())
+        if (hasCrashLog && !crashLogsDismissed) {
+            val combined = buildString {
+                if (!javaCrashLog.isNullOrBlank()) append(javaCrashLog).append("\n")
+                if (!nativeCrashLog.isNullOrBlank()) append(nativeCrashLog).append("\n")
+            }
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFFFEBEE))
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        "\u26a0\ufe0f Обнаружен лог предыдущего краша",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp,
+                        color = Color(0xFFB71C1C)
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        combined.take(2000),
+                        fontSize = 10.sp,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        color = Color(0xFF4E342E),
+                        modifier = Modifier
+                            .heightIn(max = 220.dp)
+                            .verticalScroll(rememberScrollState())
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row {
+                        Button(
+                            onClick = { onCopyToClipboard(combined) },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Копировать", fontSize = 12.sp) }
+                        Spacer(Modifier.width(8.dp))
+                        OutlinedButton(
+                            onClick = {
+                                onClearCrashLogs()
+                                crashLogsDismissed = true
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Закрыть", fontSize = 12.sp) }
+                    }
+                }
+            }
+        }
 
         Button(
             onClick = {

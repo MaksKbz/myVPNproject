@@ -1,5 +1,6 @@
 package com.makskbz.myvpnproject.vpn
 
+import android.content.Context
 import android.util.Log
 
 /**
@@ -38,6 +39,27 @@ object ProxyEngine {
             Log.i(TAG, "Native libraries loaded successfully")
         } catch (e: UnsatisfiedLinkError) {
             Log.w(TAG, "Native libs not available: ${e.message}")
+        }
+    }
+
+    /**
+     * v3.7.3 CIS-MAX: устанавливает нативный обработчик крашей (SIGABRT/
+     * SIGSEGV/...), пишущий диагностику в файл внутри filesDir приложения.
+     * Нужно вызывать один раз, как можно раньше (из MainActivity.onCreate()
+     * или Application), ДО первого ProxyEngine.start() — иначе краш при
+     * самом первом запуске VPN не будет перехвачен.
+     *
+     * Это нужно для отладки на устройствах без доступа к `adb logcat`:
+     * пользователь может открыть приложение после краша и увидеть причину
+     * прямо в UI (см. CrashLogger.kt / HelpTab() в MainActivity.kt).
+     */
+    fun installCrashHandler(context: Context) {
+        if (!nativeLibsLoaded) return
+        try {
+            installCrashHandler(CrashLogger.nativeCrashLogPath(context))
+            Log.i(TAG, "Native crash handler installed")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to install native crash handler: ${e.message}")
         }
     }
 
@@ -136,6 +158,8 @@ object ProxyEngine {
 
     @Suppress("unused")
     private external fun ciadpiVersion(): String
+
+    private external fun installCrashHandler(logPath: String)
 
     // ── JNI-объявления: tun2socks ─────────────────────────────────────
 

@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <unistd.h>
+#include "crash_handler.h"
 
 #define LOG_TAG "tun2socks_jni"
 #define LOGI(...)  __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -58,6 +59,7 @@ static void tun2socks_log_adapter(int channel, int level, const char *msg) {
 static void* tun2socks_thread(void* arg) {
     LOGI("tun2socks thread started: tun_fd=%d socks_port=%d addr=%s mtu=%d",
          g_config.tun_fd, g_config.socks_port, g_config.tun_addr, g_config.mtu);
+    crash_log_checkpoint("tun2socks_thread: entered");
 
 #ifdef BADVPN_AVAILABLE
     char socks_addr_buf[48];
@@ -73,9 +75,11 @@ static void* tun2socks_thread(void* arg) {
     cfg.socks_server_addr = socks_addr_buf;
     cfg.log_func = tun2socks_log_adapter;
 
+    crash_log_checkpoint("tun2socks_thread: calling tun2socks_bridge_run");
     // Блокирует до tun2socks_bridge_stop() из другого потока.
     int rc = tun2socks_bridge_run(&cfg);
     LOGI("tun2socks_bridge_run returned %d", rc);
+    crash_log_checkpoint("tun2socks_thread: tun2socks_bridge_run returned");
 #else
     // Fallback-заглушка: используется только если badvpn submodule
     // отсутствует на этапе сборки (BADVPN_AVAILABLE не определён в
@@ -125,6 +129,7 @@ Java_com_makskbz_myvpnproject_vpn_ProxyEngine_tun2socksStart(
         (*env)->ReleaseStringUTFChars(env, tunGw, gw);
     }
 
+    crash_log_checkpoint("tun2socksStart: config prepared, creating thread");
     g_running = 1;
     int rc = pthread_create(&g_thread, NULL, tun2socks_thread, NULL);
     if (rc != 0) {
