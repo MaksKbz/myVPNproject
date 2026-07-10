@@ -21,6 +21,17 @@ static int g_have_old[64];
 static pthread_mutex_t g_install_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_installed = 0;
 
+/* v3.7.4 CIS-MAX: раньше SA_ONSTACK был указан в sa_flags, но реальный
+ * альтернативный стек НИКОГДА не выделялся через sigaltstack() — если
+ * краш вызван переполнением стека (SIGSEGV на глубокой рекурсии/большом
+ * локальном буфере — частый сценарий в вложенном C-коде вроде lwIP),
+ * обработчик пытался бы выполниться на уже испорченном стеке и сам
+ * немедленно погибал бы, не успев ничего записать (что и объясняет
+ * полное отсутствие "=== NATIVE CRASH ===" в логах при реальном крахе
+ * на устройстве). Теперь стек реально выделяется и регистрируется. */
+#define ALT_STACK_SIZE (64 * 1024)
+static unsigned char g_alt_stack[ALT_STACK_SIZE]; /* для потока установки (обычно UI-поток) */
+
 static const int kSignals[] = { SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP };
 static const int kNumSignals = sizeof(kSignals) / sizeof(kSignals[0]);
 
@@ -134,6 +145,14 @@ void crash_handler_install(const char *log_path) {
     }
 
     if (!g_installed) {
+        /* Реально регистрируем альтернативный стек — без этого SA_ONSTACK
+         * ниже был бы бесполезен при переполнении основного стека. */
+        stack_t ss;
+        ss.ss_sp = g_alt_stack;
+        ss.ss_size = ALT_STACK_SIZE;
+        ss.ss_flags = 0;
+        sigaltstack(&ss, NULL);
+
         struct sigaction sa;
         memset(&sa, 0, sizeof(sa));
         sa.sa_sigaction = crash_signal_handler;
@@ -153,6 +172,25 @@ void crash_handler_install(const char *log_path) {
     }
 
     pthread_mutex_unlock(&g_install_mutex);
+}
+
+/* Каждый поток, где потенциально может произойти краш (ciadpi_thread,
+ * tun2socks_thread, ...), должен зарегистрировать СВОЙ альтернативный
+ * стек — sigaltstack() привязан к потоку, а не к процессу. Используем
+ * __thread (TLS), чтобы у каждого потока была отдельная область памяти
+ * под аварийный стек, не пересекающаяся с другими потоками. */
+static __thread unsigned char t_alt_stack[ALT_STACK_SIZE];
+static __thread int t_alt_stack_installed = 0;
+
+void crash_handler_install_altstack_current_thread(void) {
+    if (t_alt_stack_installed) return;
+    stack_t ss;
+    ss.ss_sp = t_alt_stack;
+    ss.ss_size = ALT_STACK_SIZE;
+    ss.ss_flags = 0;
+    if (sigaltstack(&ss, NULL) == 0) {
+        t_alt_stack_installed = 1;
+    }
 }
 
 void crash_log_checkpoint(const char *tag) {

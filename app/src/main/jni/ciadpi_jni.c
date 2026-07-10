@@ -122,6 +122,12 @@ static void cleanup_params(void) {
 }
 
 static void *ciadpi_thread(void *arg) {
+    // v3.7.4 CIS-MAX: sigaltstack() привязан к потоку, не к процессу —
+    // без этого вызова краш из-за переполнения стека ИМЕННО в этом
+    // потоке остался бы незамеченным (обработчик сам погиб бы молча,
+    // пытаясь выполниться на уже испорченном стеке).
+    crash_handler_install_altstack_current_thread();
+
     JniConfig *cfg = (JniConfig *)arg;
     LOGI("ciadpi starting on SOCKS5 127.0.0.1:%d split=%d disorder=%d fake=%d",
          cfg->socks_port, cfg->split_pos, cfg->disorder, cfg->fake_enabled);

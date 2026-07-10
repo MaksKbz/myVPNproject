@@ -43,11 +43,19 @@ object ProxyEngine {
     }
 
     /**
-     * v3.7.3 CIS-MAX: устанавливает нативный обработчик крашей (SIGABRT/
+     * v3.7.4 CIS-MAX: устанавливает нативный обработчик крашей (SIGABRT/
      * SIGSEGV/...), пишущий диагностику в файл внутри filesDir приложения.
      * Нужно вызывать один раз, как можно раньше (из MainActivity.onCreate()
      * или Application), ДО первого ProxyEngine.start() — иначе краш при
      * самом первом запуске VPN не будет перехвачен.
+     *
+     * ВАЖНО (найденный баг v3.7.3): crash_handler.c компилируется ОТДЕЛЬНО
+     * в каждую .so-библиотеку (ciadpi_jni.so и tun2socks_jni.so) — это два
+     * независимых набора глобальных переменных, а не общий модуль. Вызов
+     * только со стороны ciadpi_jni.so НЕ покрывал крашей внутри
+     * tun2socks_jni.so (там файл лога никогда не открывался — все
+     * crash_log_checkpoint() в tun2socks_thread молча ничего не писали).
+     * Теперь вызываем установку явно в ОБЕИХ библиотеках.
      *
      * Это нужно для отладки на устройствах без доступа к `adb logcat`:
      * пользователь может открыть приложение после краша и увидеть причину
@@ -55,11 +63,18 @@ object ProxyEngine {
      */
     fun installCrashHandler(context: Context) {
         if (!nativeLibsLoaded) return
+        val path = CrashLogger.nativeCrashLogPath(context)
         try {
-            installCrashHandler(CrashLogger.nativeCrashLogPath(context))
-            Log.i(TAG, "Native crash handler installed")
+            installCrashHandler(path)
+            Log.i(TAG, "Native crash handler installed (ciadpi_jni.so)")
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to install native crash handler: ${e.message}")
+            Log.w(TAG, "Failed to install native crash handler (ciadpi_jni.so): ${e.message}")
+        }
+        try {
+            installCrashHandlerTun2socks(path)
+            Log.i(TAG, "Native crash handler installed (tun2socks_jni.so)")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to install native crash handler (tun2socks_jni.so): ${e.message}")
         }
     }
 
@@ -160,6 +175,8 @@ object ProxyEngine {
     private external fun ciadpiVersion(): String
 
     private external fun installCrashHandler(logPath: String)
+
+    private external fun installCrashHandlerTun2socks(logPath: String)
 
     // ── JNI-объявления: tun2socks ─────────────────────────────────────
 

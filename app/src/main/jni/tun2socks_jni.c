@@ -57,6 +57,12 @@ static void tun2socks_log_adapter(int channel, int level, const char *msg) {
 #endif
 
 static void* tun2socks_thread(void* arg) {
+    // v3.7.4 CIS-MAX: sigaltstack() привязан к потоку, не к процессу —
+    // без этого вызова краш из-за переполнения стека ИМЕННО в этом
+    // потоке (весьма вероятно для lwIP/badvpn с их глубоко вложенными
+    // вызовами и локальными буферами) остался бы незамеченным.
+    crash_handler_install_altstack_current_thread();
+
     LOGI("tun2socks thread started: tun_fd=%d socks_port=%d addr=%s mtu=%d",
          g_config.tun_fd, g_config.socks_port, g_config.tun_addr, g_config.mtu);
     crash_log_checkpoint("tun2socks_thread: entered");
@@ -172,4 +178,30 @@ Java_com_makskbz_myvpnproject_vpn_ProxyEngine_isNativeTun2socksBuilt(
 #else
     return 0;
 #endif
+}
+
+/*
+ * v3.7.4 CIS-MAX: crash_handler.c компилируется ОТДЕЛЬНО в каждую .so
+ * (ciadpi_jni.so и tun2socks_jni.so) — это два независимых набора
+ * глобальных переменных (g_log_fd и т.д.), а не общий модуль. Установка
+ * обработчика только со стороны ciadpi_jni.so (как было в v3.7.3) НЕ
+ * покрывает крашей внутри tun2socks_jni.so — там g_log_fd оставался -1,
+ * и все crash_log_checkpoint()/сигнальные обработчики в этом модуле молча
+ * ничего не писали. Нужно устанавливать обработчик отдельно в каждой
+ * библиотеке — см. ProxyEngine.installCrashHandler(), вызывающий эту
+ * функцию наравне с одноимённой в ciadpi_jni.c.
+ */
+JNIEXPORT void JNICALL
+Java_com_makskbz_myvpnproject_vpn_ProxyEngine_installCrashHandlerTun2socks(
+        JNIEnv* env,
+        jobject thiz,
+        jstring logPath)
+{
+    (void)thiz;
+    const char* path = (*env)->GetStringUTFChars(env, logPath, NULL);
+    if (path) {
+        crash_handler_install(path);
+        crash_log_checkpoint("tun2socks_jni: crash handler installed");
+        (*env)->ReleaseStringUTFChars(env, logPath, path);
+    }
 }
