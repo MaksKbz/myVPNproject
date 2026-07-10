@@ -31,6 +31,7 @@ object CrashLogger {
     private const val TAG = "CrashLogger"
     private const val JAVA_CRASH_FILE = "crash_log_java.txt"
     const val NATIVE_CRASH_FILE = "crash_log_native.txt"
+    private const val CHECKPOINT_FILE = "crash_log_checkpoints.txt"
 
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
 
@@ -77,6 +78,48 @@ object CrashLogger {
         }
     }
 
+    /**
+     * v3.7.5 CIS-MAX: лёгкая контрольная точка на стороне Kotlin — пишется
+     * НЕМЕДЛЕННО (RandomAccessFile.fd.sync() форсирует сброс на диск), в
+     * отличие от обычного File.appendText(), которая теоретически может
+     * быть отложена буферизацией ОС/файловой системы.
+     *
+     * Нужна для диагностики SIGKILL — сигнала, который система/прошивка
+     * (например, агрессивный OEM watchdog вроде ColorOS/MIUI Autostart
+     * Manager) может послать процессу напрямую, минуя любые перехватчики
+     * (ни Thread.UncaughtExceptionHandler, ни нативный sigaction — оба
+     * бессильны против SIGKILL). Единственный способ понять, ГДЕ именно
+     * произошла смерть процесса — расставить частые контрольные точки и
+     * посмотреть, какая из них была записана последней.
+     */
+    // Ограничение размера файла чекпоинтов, чтобы он не рос бесконечно
+    // между сеансами (пользователь может много раз запускать/
+    // останавливать VPN без единого краша) — при превышении просто
+    // обрезаем файл и начинаем заново, самое важное всё равно последние
+    // записи перед крахом.
+    private const val MAX_CHECKPOINT_FILE_SIZE = 64 * 1024L
+
+    fun checkpoint(context: Context, tag: String) {
+        try {
+            val f = File(context.filesDir, CHECKPOINT_FILE)
+            if (f.exists() && f.length() > MAX_CHECKPOINT_FILE_SIZE) {
+                f.delete()
+            }
+            java.io.RandomAccessFile(f, "rw").use { raf ->
+                raf.seek(raf.length())
+                val line = "[kt-checkpoint t=${System.currentTimeMillis()}] $tag\n"
+                raf.write(line.toByteArray(Charsets.UTF_8))
+                raf.fd.sync()
+            }
+        } catch (_: Exception) {
+            // не должно мешать основному потоку выполнения
+        }
+    }
+
+    /** Читает лог Kotlin-контрольных точек, если файл существует и не пуст. */
+    fun readCheckpointLog(context: Context): String? =
+        readIfExists(context, CHECKPOINT_FILE)
+
     /** Возвращает путь к файлу нативных крашей — передаётся в JNI. */
     fun nativeCrashLogPath(context: Context): String =
         File(context.filesDir, NATIVE_CRASH_FILE).absolutePath
@@ -101,5 +144,6 @@ object CrashLogger {
     fun clearAll(context: Context) {
         try { File(context.filesDir, JAVA_CRASH_FILE).delete() } catch (_: Exception) {}
         try { File(context.filesDir, NATIVE_CRASH_FILE).delete() } catch (_: Exception) {}
+        try { File(context.filesDir, CHECKPOINT_FILE).delete() } catch (_: Exception) {}
     }
 }

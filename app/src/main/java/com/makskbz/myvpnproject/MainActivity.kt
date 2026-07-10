@@ -53,6 +53,7 @@ class MainActivity : ComponentActivity() {
         // видит причину прямо в приложении (вкладка "Справка" ниже).
         CrashLogger.install(this)
         ProxyEngine.installCrashHandler(this)
+        CrashLogger.checkpoint(this, "MainActivity.onCreate() — приложение запущено")
 
         // Исправление #1 (КРИТИЧЕСКОЕ): запрашиваем POST_NOTIFICATIONS на Android 13+
         // Без этого foreground-уведомление не появится и система может убить сервис.
@@ -77,6 +78,11 @@ class MainActivity : ComponentActivity() {
         // был adb. Копируем в переменные ДО clearAll(), иначе покажем пустоту.
         val javaCrash = CrashLogger.readJavaCrashLog(this)
         val nativeCrash = CrashLogger.readNativeCrashLog(this)
+        // v3.7.5 CIS-MAX: лог Kotlin-контрольных точек — критичен для
+        // диагностики SIGKILL (агрессивные OEM-watchdog'и вроде ColorOS
+        // Autostart Manager), который не перехватывается ни Java, ни C
+        // обработчиками. Последняя записанная точка = последний живой шаг.
+        val checkpointsLog = CrashLogger.readCheckpointLog(this)
 
         setContent {
             MaterialTheme {
@@ -98,6 +104,7 @@ class MainActivity : ComponentActivity() {
                         },
                         javaCrashLog     = javaCrash,
                         nativeCrashLog   = nativeCrash,
+                        checkpointsLog   = checkpointsLog,
                         onClearCrashLogs = { CrashLogger.clearAll(this) },
                         onCopyToClipboard = { text -> copyToClipboard(text) }
                     )
@@ -136,7 +143,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestVpnPermission() {
+        // v3.7.5 CIS-MAX: чекпоинты для диагностики SIGKILL — сигнала,
+        // который ни Kotlin UncaughtExceptionHandler, ни нативный
+        // sigaction() перехватить не могут (агрессивные OEM-watchdog'и
+        // вроде ColorOS/MIUI Autostart Manager убивают процесс напрямую).
+        // Единственный способ понять, где именно умер процесс — частые
+        // контрольные точки на диске, проверяемые при следующем запуске.
+        CrashLogger.checkpoint(this, "MainActivity: 'Запустить VPN' нажата, requestVpnPermission()")
         val intent = VpnService.prepare(this)
+        CrashLogger.checkpoint(this, "MainActivity: VpnService.prepare() вернул ${if (intent != null) "intent(нужно разрешение)" else "null(разрешение уже есть)"}")
         if (intent != null) startActivityForResult(intent, VPN_REQUEST_CODE)
         else onActivityResult(VPN_REQUEST_CODE, RESULT_OK, null)
     }
@@ -149,10 +164,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        CrashLogger.checkpoint(this, "MainActivity.onActivityResult: requestCode=$requestCode resultCode=$resultCode")
         if (requestCode == VPN_REQUEST_CODE && resultCode == RESULT_OK) {
+            CrashLogger.checkpoint(this, "MainActivity: VPN-разрешение получено, сохраняем конфиг")
             val cfg = ConfigManager.loadPreset(selectedPresetId.value)
                 .copy(allowedApps = selectedPackages.toList())
             ConfigManager.saveConfig(this, cfg)
+            CrashLogger.checkpoint(this, "MainActivity: вызываем startService(ACTION_START)")
             startService(Intent(this, BypassVpnService::class.java).apply {
                 action = BypassVpnService.ACTION_START
                 putExtra(BypassVpnService.EXTRA_PRESET_ID, selectedPresetId.value)
@@ -161,6 +179,9 @@ class MainActivity : ComponentActivity() {
                     ArrayList(selectedPackages)
                 )
             })
+            CrashLogger.checkpoint(this, "MainActivity: startService(ACTION_START) вернулся без исключения")
+        } else if (requestCode == VPN_REQUEST_CODE) {
+            CrashLogger.checkpoint(this, "MainActivity: пользователь ОТКАЗАЛ в VPN-разрешении (resultCode=$resultCode)")
         }
     }
 }
@@ -179,6 +200,7 @@ fun MainScreen(
     onSaveConfig: (String) -> Unit,
     javaCrashLog: String? = null,
     nativeCrashLog: String? = null,
+    checkpointsLog: String? = null,
     onClearCrashLogs: () -> Unit = {},
     onCopyToClipboard: (String) -> Unit = {}
 ) {
@@ -210,13 +232,21 @@ fun MainScreen(
         // исключение ИЛИ нативный сигнал SIGABRT/SIGSEGV/...), показываем
         // причину прямо здесь — самое заметное место экрана, чтобы
         // пользователь мог скопировать текст и прислать разработчику без
-        // необходимости в adb logcat.
-        val hasCrashLog = (!javaCrashLog.isNullOrBlank() || !nativeCrashLog.isNullOrBlank())
+        // необходимости в adb logcat. v3.7.5: если крашлоги пусты (обычно
+        // это означает SIGKILL — сигнал, который вообще не перехватывается
+        // ни Java, ни C кодом), всё равно показываем лог контрольных точек
+        // Kotlin — по последней записанной строке видно последний живой шаг.
+        val hasCrashLog = (!javaCrashLog.isNullOrBlank() || !nativeCrashLog.isNullOrBlank() || !checkpointsLog.isNullOrBlank())
         if (hasCrashLog && !crashLogsDismissed) {
             val combined = buildString {
                 if (!javaCrashLog.isNullOrBlank()) append(javaCrashLog).append("\n")
                 if (!nativeCrashLog.isNullOrBlank()) append(nativeCrashLog).append("\n")
+                if (!checkpointsLog.isNullOrBlank()) {
+                    append("=== KOTLIN CHECKPOINTS (последний = последний живой шаг) ===\n")
+                    append(checkpointsLog).append("\n")
+                }
             }
+
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -232,7 +262,12 @@ fun MainScreen(
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        combined.take(2000),
+                        // v3.7.5: показываем ПОСЛЕДНИЕ 4000 символов, а не
+                        // первые — при накоплении многих чекпоинтов самое
+                        // важное (последний живой шаг перед крахом) всегда
+                        // в конце текста. Кнопка "Копировать" всё равно
+                        // копирует полный текст без обрезки.
+                        combined.takeLast(4000),
                         fontSize = 10.sp,
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                         color = Color(0xFF4E342E),

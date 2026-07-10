@@ -45,10 +45,12 @@ class BypassVpnService : VpnService(), Runnable {
 
     override fun onCreate() {
         super.onCreate()
+        CrashLogger.checkpoint(this, "BypassVpnService.onCreate()")
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        CrashLogger.checkpoint(this, "BypassVpnService.onStartCommand: action=${intent?.action}")
         when (intent?.action) {
             ACTION_START -> {
                 activePresetId = intent.getStringExtra(EXTRA_PRESET_ID) ?: "universal"
@@ -64,7 +66,14 @@ class BypassVpnService : VpnService(), Runnable {
     private fun startVpn(allowedApps: ArrayList<String>?) {
         if (isRunning) return
         isRunning = true
-        startForeground(NOTIFICATION_ID, buildNotification())
+        CrashLogger.checkpoint(this, "startVpn: перед startForeground()")
+        try {
+            startForeground(NOTIFICATION_ID, buildNotification())
+            CrashLogger.checkpoint(this, "startVpn: startForeground() успешно выполнен")
+        } catch (e: Throwable) {
+            CrashLogger.checkpoint(this, "startVpn: startForeground() выбросил ${e.javaClass.name}: ${e.message}")
+            throw e
+        }
         executorService = Executors.newCachedThreadPool()
         vpnThread = Thread({ runVpn(allowedApps) }, "BypassVpnThread").apply { start() }
         Log.i(TAG, "VPN service v3.5-hybrid started. Preset: $activePresetId")
@@ -110,6 +119,7 @@ class BypassVpnService : VpnService(), Runnable {
      */
     private fun runVpn(allowedApps: ArrayList<String>?) {
         try {
+            CrashLogger.checkpoint(this, "runVpn: начало, allowedApps=${allowedApps?.size ?: 0}")
             val builder = Builder()
                 .setSession("myVPNproject")
                 .addAddress("10.0.0.2", 24)
@@ -165,7 +175,9 @@ class BypassVpnService : VpnService(), Runnable {
                 try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
             }
 
+            CrashLogger.checkpoint(this, "runVpn: перед builder.establish()")
             vpnInterface = builder.establish()
+            CrashLogger.checkpoint(this, "runVpn: builder.establish() вернул ${if (vpnInterface != null) "успех" else "null"}")
             if (vpnInterface == null) {
                 Log.e(TAG, "Failed to establish VPN interface")
                 isRunning = false
@@ -174,19 +186,23 @@ class BypassVpnService : VpnService(), Runnable {
 
             currentConfig = ConfigManager.loadPreset(activePresetId)
             val tunFd = vpnInterface!!.fd
+            CrashLogger.checkpoint(this, "runVpn: tunFd=$tunFd, перед ProxyEngine.start()")
 
             val nativeOk = try {
                 ProxyEngine.start(tunFd, currentConfig)
             } catch (e: Exception) {
                 Log.e(TAG, "ProxyEngine start failed", e)
+                CrashLogger.checkpoint(this, "runVpn: ProxyEngine.start() выбросил ${e.javaClass.name}: ${e.message}")
                 false
             }
+            CrashLogger.checkpoint(this, "runVpn: ProxyEngine.start() вернул $nativeOk")
             val nativeTun2socksBuilt = try {
                 nativeOk && ProxyEngine.isNativeTun2socksBuilt()
             } catch (e: Exception) {
                 Log.w(TAG, "isNativeTun2socksBuilt check failed: ${e.message}")
                 false
             }
+            CrashLogger.checkpoint(this, "runVpn: nativeTun2socksBuilt=$nativeTun2socksBuilt")
             Log.i(TAG, "Native engine started=$nativeOk nativeTun2socks=$nativeTun2socksBuilt " +
                     "preset=$activePresetId fd=$tunFd port=${currentConfig.socksPort}")
 
@@ -200,6 +216,7 @@ class BypassVpnService : VpnService(), Runnable {
                 // тот же fd — вместо packet-loop просто ждём остановки
                 // сервиса, обновляя уведомление по таймеру.
                 Log.i(TAG, "Native tun2socks active — Kotlin packet-loop disabled, TUN owned by native code")
+                CrashLogger.checkpoint(this, "runVpn: перед runNativeIdleLoop()")
                 runNativeIdleLoop()
             } else {
                 // Fallback: badvpn недоступен на этапе сборки (stub-режим).
@@ -207,16 +224,21 @@ class BypassVpnService : VpnService(), Runnable {
                 // он НЕ гарантирует полноценную доставку пакетов в интернет
                 // (нет реального TCP/IP стека), см. TUN2SOCKS_AND_ECH_PLAN.md.
                 Log.w(TAG, "Native tun2socks NOT built — falling back to limited Kotlin packet-loop")
+                CrashLogger.checkpoint(this, "runVpn: перед runKotlinPacketLoop()")
                 runKotlinPacketLoop()
             }
 
         } catch (e: InterruptedException) {
             Log.i(TAG, "VPN thread interrupted")
+            CrashLogger.checkpoint(this, "runVpn: InterruptedException пойман")
         } catch (e: IOException) {
             Log.e(TAG, "VPN IO exception", e)
-        } catch (e: Exception) {
+            CrashLogger.checkpoint(this, "runVpn: IOException пойман: ${e.message}")
+        } catch (e: Throwable) {
             Log.e(TAG, "VPN fatal", e)
+            CrashLogger.checkpoint(this, "runVpn: FATAL Throwable ${e.javaClass.name}: ${e.message}")
         } finally {
+            CrashLogger.checkpoint(this, "runVpn: finally, вызываем stopVpn()")
             stopVpn()
         }
     }
@@ -230,6 +252,7 @@ class BypassVpnService : VpnService(), Runnable {
      * тегу tun2socks_jni/ciadpi_jni).
      */
     private fun runNativeIdleLoop() {
+        CrashLogger.checkpoint(this, "runNativeIdleLoop: вход, isRunning=$isRunning")
         var lastNotifyTime = System.currentTimeMillis()
         while (isRunning) {
             try {
@@ -462,8 +485,30 @@ class BypassVpnService : VpnService(), Runnable {
     }
 
     override fun onDestroy() {
+        CrashLogger.checkpoint(this, "BypassVpnService.onDestroy() — сервис уничтожается системой или самим приложением")
         stopVpn()
         super.onDestroy()
+    }
+
+    // v3.7.5 CIS-MAX: onTaskRemoved() вызывается, когда пользователь свайпает
+    // приложение из списка недавних — на некоторых агрессивных прошивках
+    // (ColorOS/MIUI) система может это интерпретировать как "приложение
+    // закрыто" и убить процесс целиком вместе с сервисом, даже если сервис
+    // формально foreground. Чекпоинт поможет отличить этот сценарий от
+    // краша при простом нажатии кнопки (когда приложение остаётся открытым).
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        CrashLogger.checkpoint(this, "BypassVpnService.onTaskRemoved() — приложение убрано из недавних задач")
+        super.onTaskRemoved(rootIntent)
+    }
+
+    override fun onLowMemory() {
+        CrashLogger.checkpoint(this, "BypassVpnService.onLowMemory() — система сигнализирует о нехватке памяти")
+        super.onLowMemory()
+    }
+
+    override fun onTrimMemory(level: Int) {
+        CrashLogger.checkpoint(this, "BypassVpnService.onTrimMemory(level=$level)")
+        super.onTrimMemory(level)
     }
 
     // ── Foreground helpers ────────────────────────────────────────────
