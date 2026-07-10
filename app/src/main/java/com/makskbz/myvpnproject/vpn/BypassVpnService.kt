@@ -254,12 +254,24 @@ class BypassVpnService : VpnService(), Runnable {
     private fun runNativeIdleLoop() {
         CrashLogger.checkpoint(this, "runNativeIdleLoop: вход, isRunning=$isRunning")
         var lastNotifyTime = System.currentTimeMillis()
+        // v3.7.6 CIS-MAX: чекпоинт КАЖДУЮ секунду (не только при входе) —
+        // резко сужает окно неопределённости при диагностике SIGKILL. Если
+        // Kotlin-поток успевает записать несколько таких точек перед
+        // смертью процесса, значит сам Kotlin/JVM был жив всё это время —
+        // убило либо нативный код (tun2socks/ciadpi под реальной сетевой
+        // нагрузкой, не протестированной синтетическим E2E-тестом с одним
+        // TCP-соединением), либо процесс целиком системным watchdog'ом
+        // ПОКА JVM ещё жила. Если же после "вход" сразу тишина — процесс
+        // убит практически мгновенно после входа в цикл.
+        var tick = 0
         while (isRunning) {
             try {
                 Thread.sleep(1000)
             } catch (_: InterruptedException) {
                 break
             }
+            tick++
+            CrashLogger.checkpoint(this, "runNativeIdleLoop: tick=$tick (${tick}s после входа)")
             val now = System.currentTimeMillis()
             if (now - lastNotifyTime > 10000) {
                 updateNotification("Активен (native tun2socks) • $activePresetId")
@@ -330,10 +342,14 @@ class BypassVpnService : VpnService(), Runnable {
     private fun startAsnAutoDetect() {
         Thread({
             try {
+                CrashLogger.checkpoint(this, "startAsnAutoDetect: поток запущен, ждём 1500ms")
                 Thread.sleep(1500) // даём TUN/native-движку время подняться
                 if (!isRunning) return@Thread
+                CrashLogger.checkpoint(this, "startAsnAutoDetect: вызываем NetworkProfileDetector.detect()")
                 val profile = NetworkProfileDetector.detect(this)
+                CrashLogger.checkpoint(this, "startAsnAutoDetect: detect() вернул isp=${profile?.isp} asn=${profile?.asn}")
                 val suggested = NetworkProfileDetector.presetForIsp(profile)
+                CrashLogger.checkpoint(this, "startAsnAutoDetect: suggested=$suggested activePresetId=$activePresetId")
                 // Не перебиваем осознанный выбор пользователя — авто-подстановку
                 // делаем только если активен пресет по умолчанию ("universal").
                 if (suggested != null && suggested != activePresetId &&
@@ -343,21 +359,30 @@ class BypassVpnService : VpnService(), Runnable {
                     activePresetId = suggested
                     currentConfig = ConfigManager.loadPreset(suggested)
                     try {
+                        CrashLogger.checkpoint(this, "startAsnAutoDetect: перед ProxyEngine.stop() (рестарт на пресет $suggested)")
                         ProxyEngine.stop()
+                        CrashLogger.checkpoint(this, "startAsnAutoDetect: ProxyEngine.stop() вернулся")
                         val tunFd = vpnInterface?.fd ?: -1
                         if (tunFd > 0) {
                             Thread.sleep(300)
+                            CrashLogger.checkpoint(this, "startAsnAutoDetect: перед ProxyEngine.start() tunFd=$tunFd")
                             ProxyEngine.start(tunFd, currentConfig)
+                            CrashLogger.checkpoint(this, "startAsnAutoDetect: ProxyEngine.start() вернулся")
                         }
-                    } catch (e: Exception) {
+                    } catch (e: Throwable) {
                         Log.e(TAG, "Failed to apply ASN-detected preset", e)
+                        CrashLogger.checkpoint(this, "startAsnAutoDetect: ИСКЛЮЧЕНИЕ при рестарте ${e.javaClass.name}: ${e.message}")
                     }
                     updateNotification("Авто-определение оператора → $suggested")
+                } else {
+                    CrashLogger.checkpoint(this, "startAsnAutoDetect: рестарт не требуется (условие не выполнено)")
                 }
             } catch (_: InterruptedException) {
                 // сервис остановлен во время детекта — это нормально
-            } catch (e: Exception) {
+                CrashLogger.checkpoint(this, "startAsnAutoDetect: InterruptedException (нормально)")
+            } catch (e: Throwable) {
                 Log.w(TAG, "ASN auto-detect failed: ${e.message}")
+                CrashLogger.checkpoint(this, "startAsnAutoDetect: FATAL ${e.javaClass.name}: ${e.message}")
             }
         }, "AsnAutoDetect").apply { isDaemon = true; start() }
     }
