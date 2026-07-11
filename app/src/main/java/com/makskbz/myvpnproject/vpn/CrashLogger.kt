@@ -144,9 +144,73 @@ object CrashLogger {
         }
     }
 
+    /**
+     * v3.7.9 CIS-MAX: НАЙДЕН И ИСПРАВЛЕН критический баг, объясняющий,
+     * почему нативный (C) crash-лог за 4 версии подряд (v3.7.5-v3.7.8) НИ
+     * РАЗУ не содержал ни единой строки из ciadpi_thread/tun2socks_thread
+     * (ни маркеров входа в поток, ни новых connection-чекпоинтов из
+     * v3.7.8) — несмотря на то, что оба потока доказуемо успешно
+     * стартовали (ProxyEngine.start() возвращал true).
+     *
+     * Механизм (подтверждён локальным C-экспериментом с unlink() при
+     * открытом fd): crash_handler.c открывает g_log_fd ОДИН РАЗ на всё
+     * время жизни ПРОЦЕССА (см. crash_handler_install() —
+     * `if (g_log_fd < 0 && log_path) g_log_fd = open(...)`), вызывается
+     * из MainActivity.onCreate() → ProxyEngine.installCrashHandler().
+     * Естественный сценарий использования: пользователь видит карточку
+     * с логом прошлого краха → жмёт "Закрыть" (эта функция, СТАРАЯ
+     * версия использовала File.delete() = unlink()) → тут же жмёт
+     * "Запустить VPN" — всё это в РАМКАХ ОДНОГО И ТОГО ЖЕ процесса
+     * (Activity не пересоздаётся). unlink() удаляет directory entry, но
+     * ПОКА g_log_fd остаётся открытым на тот же (уже осиротевший) inode
+     * — а он остаётся открытым ВСЕГДА, crash_handler.c никогда не
+     * переоткрывает путь повторно. Все последующие
+     * crash_log_checkpoint()-записи из ciadpi_thread/tun2socks_thread
+     * (маркеры входа в поток, TCP/SOCKS5 connection-чекпоинты) успешно
+     * проходят системный write(), но пишутся в НЕДОСТИЖИМЫЙ по пути
+     * inode — и безвозвратно теряются в момент смерти процесса
+     * (crash/SIGKILL закрывает fd, данные orphan-инода исчезают
+     * навсегда). Именно поэтому во всех 4 присланных логах единственные
+     * нативные строки — это "installed" ОТ СЛЕДУЮЩЕГО перезапуска (со
+     * свежим g_log_fd = -1, открывающим путь заново), а не от упавшего
+     * процесса.
+     *
+     * ВАЖНО: Kotlin-сторона (checkpoint()/appendToFile()) этому багу НЕ
+     * подвержена — она открывает файл ЗАНОВО по пути на каждую отдельную
+     * запись (RandomAccessFile(f, "rw") / File.appendText()), поэтому
+     * "самоисцеляется" после удаления. Асимметрия между
+     * persistent-fd-C-кодом и reopen-per-write-Kotlin-кодом и есть
+     * корень проблемы.
+     *
+     * Исправление: НЕ удалять (unlink) NATIVE_CRASH_FILE, а ОБРЕЗАТЬ ЕГО
+     * ДО НУЛЯ ПО ТОМУ ЖЕ ПУТИ (RandomAccessFile.setLength(0) →
+     * ftruncate() на тот же inode, без удаления directory entry). Тогда
+     * уже открытый в C-коде g_log_fd (O_APPEND) продолжает указывать на
+     * тот же самый (теперь пустой) файл, и следующие write() снова
+     * видны по пути. Подтверждено локальным C-экспериментом: после
+     * truncate(path, 0) при открытом fd, последующие записи в тот же fd
+     * КОРРЕКТНО видны через путь, в отличие от unlink().
+     */
     fun clearAll(context: Context) {
         try { File(context.filesDir, JAVA_CRASH_FILE).delete() } catch (_: Exception) {}
-        try { File(context.filesDir, NATIVE_CRASH_FILE).delete() } catch (_: Exception) {}
+        truncateInPlace(context, NATIVE_CRASH_FILE)
         try { File(context.filesDir, CHECKPOINT_FILE).delete() } catch (_: Exception) {}
+    }
+
+    /**
+     * Обрезает файл до нулевой длины ПО ТОМУ ЖЕ ПУТИ/inode, не удаляя
+     * directory entry — безопасно для файлов, к которым нативный код
+     * (crash_handler.c) может держать долгоживущий открытый fd. См.
+     * подробное объяснение в clearAll() выше.
+     */
+    private fun truncateInPlace(context: Context, fileName: String) {
+        try {
+            val f = File(context.filesDir, fileName)
+            if (f.exists()) {
+                java.io.RandomAccessFile(f, "rw").use { it.setLength(0) }
+            }
+        } catch (_: Exception) {
+            // не должно мешать основному потоку выполнения
+        }
     }
 }
