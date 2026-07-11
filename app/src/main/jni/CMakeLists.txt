@@ -125,6 +125,7 @@ if(BADVPN_AVAILABLE)
         ${BADVPN_DIR}/lwip/src/include/ipv6
         ${BADVPN_DIR}/lwip/custom
         ${BADVPN_DIR}/tun2socks
+        ${CMAKE_SOURCE_DIR}
     )
     target_compile_definitions(badvpn_tun2socks PRIVATE
         TUN2SOCKS_LIBRARY_MODE=1

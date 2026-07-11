@@ -535,6 +535,19 @@ static int on_accept(struct poolhd *pool, struct eval *val, int et) {
             continue;
         }
         rval->addr = client;
+#ifdef ANDROID_APP
+        /* v3.7.8 CIS-MAX: чекпоинт на каждое принятое SOCKS5-соединение —
+         * помогает локализовать краш под реальной нагрузкой множества
+         * параллельных клиентов (десятки приложений телефона одновременно
+         * идут через tun2socks -> SOCKS5 -> ciadpi), которую не
+         * воспроизводит синтетический E2E-тест с одним соединением. */
+        {
+            extern void crash_log_checkpoint(const char *tag);
+            char dbgbuf[64];
+            int dbgn = snprintf(dbgbuf, sizeof(dbgbuf), "ciadpi: SOCKS5 client fd=%d accepted", c);
+            if (dbgn > 0) crash_log_checkpoint(dbgbuf);
+        }
+#endif
 #ifdef __linux__
         if ((params.mode & MODE_TRANSPARENT) &&
                 transp_conn(pool, rval) < 0) {

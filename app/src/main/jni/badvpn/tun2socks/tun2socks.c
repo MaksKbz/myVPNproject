@@ -91,6 +91,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include "tun2socks_bridge.h"
+#include "crash_handler.h"
 
 /* self-pipe для потокобезопасной остановки реактора из другого потока:
  * BReactor не защищён мьютексами (NO_SYS=1 дизайн lwIP), поэтому нельзя
@@ -1403,6 +1404,19 @@ err_t listener_accept_func (void *arg, struct tcp_pcb *newpcb, err_t err)
     // increment counter
     ASSERT(num_clients >= 0)
     num_clients++;
+#ifdef TUN2SOCKS_LIBRARY_MODE
+    /* v3.7.8 CIS-MAX: чекпоинт на каждое принятое TCP-соединение — помогает
+     * локализовать краш, происходящий под реальной нагрузкой множества
+     * параллельных клиентов (десятки приложений телефона одновременно
+     * подключаются через VPN), которую не воспроизводит синтетический
+     * E2E-тест с одним соединением. */
+    {
+        char dbgbuf[96];
+        int dbgn = snprintf(dbgbuf, sizeof(dbgbuf),
+            "tun2socks: TCP client #%d accepted", num_clients);
+        if (dbgn > 0) crash_log_checkpoint(dbgbuf);
+    }
+#endif
     
     // set pcb
     client->pcb = newpcb;
