@@ -14,8 +14,8 @@ android {
         applicationId = "com.makskbz.myvpnproject"
         minSdk = 24
         targetSdk = 35
-        versionCode = 27
-        versionName = "3.7.9-cis-max-fix-native-log-truncate"
+        versionCode = 28
+        versionName = "3.7.10-cis-max-fix-mempool-sigsegv"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
 

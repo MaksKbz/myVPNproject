@@ -77,6 +77,38 @@ static void init_params(const JniConfig *cfg) {
     params.baddr.in6.sin6_addr   = in6addr_any;
     params.baddr.in6.sin6_port   = 0;
 
+    // v3.7.10 CIS-MAX: КРИТИЧЕСКИЙ фикс — найден и подтверждён реальный
+    // SIGSEGV с реального устройства (faulting address: 0x2, детерминированно
+    // на 4-м TCP-клиенте, дважды подряд после автоперезапуска). offsetof(struct
+    // mphdr, cmp_type) == 2 (подтверждено локальным экспериментом с gcc) —
+    // 0x2 это NULL-указатель + 2 байта, т.е. разыменование
+    // params.mempool->cmp_type при params.mempool == NULL.
+    //
+    // Апстримный byedpi (main.c: parse_args()) ВСЕГДА создаёт
+    // params.mempool = mem_pool(MF_EXTRA, CMP_BITS) перед стартом run() —
+    // это глобальный кэш desync-параметров по IP назначения, используемый
+    // в extend.c: cache_get()/cache_add() (вызываются из connect_hook() на
+    // КАЖДОМ новом TCP-соединении через find_dp()/on_trigger()). Наш
+    // init_params() строит struct params вручную (не через parse_args()) и
+    // никогда не инициализировал params.mempool — memset() выше оставляет
+    // его NULL. Как только код доходит до обращения к кэшу (не на первом
+    // же соединении — путь зависит от внутренней логики find_dp/on_trigger,
+    // отсюда и краш именно на 4-м клиенте, а не на 1-м), происходит
+    // разыменование NULL->cmp_type -> SIGSEGV по адресу 0x2.
+    //
+    // Это ПОЛНОСТЬЮ объясняет всю картину предыдущих логов (v3.7.5-v3.7.8):
+    // native crash-лог был пуст не из-за SIGKILL, а из-за отдельного бага
+    // диагностики (v3.7.9, unlink() при открытом fd) — после того фикса
+    // мы наконец увидели этот SIGSEGV. Обе гипотезы (OOM/LMK, race condition
+    // под нагрузкой) были ошибочными — реальная причина проста и
+    // детерминирована: забытая инициализация mempool.
+    if (!params.mempool) {
+        params.mempool = mem_pool(MF_EXTRA, CMP_BITS);
+        if (!params.mempool) {
+            LOGE("OOM: mem_pool (mempool)");
+        }
+    }
+
     params.dp = (struct desync_params *)calloc(1, sizeof(struct desync_params));
     if (!params.dp) { LOGE("OOM: desync_params"); return; }
     params.dp_n = 1;
@@ -115,6 +147,17 @@ static void cleanup_params(void) {
         free(params.dp);
         params.dp   = NULL;
         params.dp_n = 0;
+    }
+    // v3.7.10 CIS-MAX: освобождаем mempool (см. init_params()) — движок
+    // может быть перезапущен несколько раз за время жизни процесса
+    // (ProxyEngine.stop()+start() при переключении пресета в
+    // startAsnAutoDetect()/switchToNextPreset()), а следующий init_params()
+    // создаст новый пустой mempool через mem_pool(). Без явного
+    // mem_destroy() здесь старый mempool (и весь накопленный в нём кэш
+    // desync-параметров по IP) утёк бы при каждом таком рестарте.
+    if (params.mempool) {
+        mem_destroy(params.mempool);
+        params.mempool = NULL;
     }
     free(fake_tls.data);  fake_tls.data  = NULL;
     free(fake_http.data); fake_http.data = NULL;
