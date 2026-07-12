@@ -37,6 +37,18 @@ class BypassVpnService : VpnService(), Runnable {
     private var vpnThread: Thread? = null
     private var executorService: ExecutorService? = null
     private var monitorThread: Thread? = null
+    // v3.7.11 CIS-MAX: ссылка на асинхронный поток остановки нативного
+    // движка (см. stopVpn()) — нужна, чтобы startVpn() мог дождаться его
+    // завершения (с таймаутом) перед повторным запуском. Без этого при
+    // быстром цикле "Остановить" -> сразу "Запустить" ProxyEngine.start()
+    // мог бы столкнуться с ещё не остановленным g_running=1 внутри
+    // ciadpiStart()/tun2socksStart() (обе JNI-функции в этом случае молча
+    // возвращают "успех" без реального запуска нового потока — см.
+    // ciadpi_jni.c/tun2socks_jni.c: "if (g_running) { ...; return 0; }") —
+    // то есть UI показал бы, что VPN включился, а по факту старый
+    // (в процессе остановки) движок продолжает работать со старой
+    // конфигурацией/портом, либо новый вообще не стартует.
+    @Volatile private var proxyEngineStopThread: Thread? = null
     @Volatile private var isRunning = false
     @Volatile private var activePresetId: String = "universal"
     @Volatile private var currentConfig: BypassConfig = ConfigManager.loadPreset("universal")
@@ -67,6 +79,23 @@ class BypassVpnService : VpnService(), Runnable {
 
     private fun startVpn(allowedApps: ArrayList<String>?) {
         if (isRunning) return
+        // v3.7.11 CIS-MAX: если предыдущая остановка (см. stopVpn()) ещё не
+        // успела завершить ProxyEngine.stop() в своём асинхронном потоке —
+        // ждём её (с таймаутом на случай, если тот поток сам где-то завис,
+        // чтобы не заблокировать запуск VPN навсегда). Без этого быстрый
+        // цикл "Остановить" -> "Запустить" рисковал бы столкнуться с
+        // g_running=1 внутри ciadpiStart()/tun2socksStart() от предыдущего,
+        // ещё не остановленного движка.
+        proxyEngineStopThread?.let { t ->
+            if (t.isAlive) {
+                CrashLogger.checkpoint(this, "startVpn: ждём завершения предыдущего ProxyEngine.stop()")
+                try { t.join(3000) } catch (_: InterruptedException) {}
+                if (t.isAlive) {
+                    CrashLogger.checkpoint(this, "startVpn: предыдущий ProxyEngine.stop() всё ещё не завершился после 3с — продолжаем всё равно")
+                }
+            }
+        }
+        proxyEngineStopThread = null
         isRunning = true
         CrashLogger.checkpoint(this, "startVpn: перед startForeground()")
         try {
@@ -135,20 +164,82 @@ class BypassVpnService : VpnService(), Runnable {
         }, "FastMemoryWatch").apply { isDaemon = true; start() }
     }
 
+    // v3.7.11 CIS-MAX: КРИТИЧЕСКИЙ фикс — пользователь сообщил, что нажатие
+    // "ОСТАНОВИТЬ VPN" в UI не убирает системный значок VPN-ключа в статус-
+    // баре Android — приходится вручную отключать через системное
+    // всплывающее уведомление "VPN подключён".
+    //
+    // Причина: старый порядок был (1) ProxyEngine.stop() (2)
+    // vpnInterface?.close(). ProxyEngine.stop() делает pthread_join() на
+    // ДВУХ нативных потоках (tun2socks_thread, ciadpi_thread) и блокирует
+    // вызывающий поток, пока они не завершатся сами. Android же считает
+    // VPN активным до тех пор, пока не закрыт файловый дескриптор
+    // vpnInterface (см. VpnService.Builder.establish() — системный
+    // VPN-индикатор привязан именно к этому fd, а не к жизни процесса
+    // приложения) — то есть значок ключа висит ровно до строки (2), а она
+    // выполняется только ПОСЛЕ того, как оба потока успеют дойти до
+    // pthread_join(). В byedpi resolve() использует блокирующий
+    // getaddrinfo() без таймаута прямо в однопоточном event loop
+    // ciadpi_thread — если в момент нажатия "Остановить" шёл DNS-резолв,
+    // поток застревает там на неопределённое время (getaddrinfo() не
+    // прерывается сигналом остановки shutdown(server_fd) и не имеет
+    // настраиваемого таймаута), и pthread_join() в главном потоке ждёт
+    // этого сколько угодно — vpnInterface.close() никогда не
+    // выполняется, и системный VPN-индикатор не гаснет.
+    //
+    // Исправление: закрываем vpnInterface ПЕРВЫМ ДЕЛОМ (немедленно
+    // освобождает VPN на уровне системы — Android сразу гасит значок и
+    // восстанавливает обычную маршрутизацию, что решает видимый
+    // пользователю симптом), а остановку native-движка (ProxyEngine.stop())
+    // переносим в отдельный поток — она больше не блокирует ни главный
+    // поток, ни возврат из stopVpn()/onStartCommand(), и не может вызвать
+    // ANR, даже если native-потоки зависнут на getaddrinfo() на долгое
+    // время.
     private fun stopVpn() {
         if (!isRunning) return
         isRunning = false
+        CrashLogger.checkpoint(this, "stopVpn: начало")
         monitorThread?.interrupt()
         monitorThread = null
-        try { ProxyEngine.stop() } catch (e: Exception) { Log.w(TAG, "ProxyEngine stop error", e) }
-        try { vpnInterface?.close() } catch (e: Exception) { Log.e(TAG, "Close error", e) }
+
+        // Шаг 1 (КРИТИЧНО первым): закрываем TUN fd — Android немедленно
+        // считает VPN отключённым и гасит системный значок/уведомление,
+        // независимо от того, как долго ещё будет останавливаться
+        // нативный движок ниже.
+        try {
+            vpnInterface?.close()
+            CrashLogger.checkpoint(this, "stopVpn: vpnInterface.close() выполнен")
+        } catch (e: Exception) {
+            Log.e(TAG, "Close error", e)
+            CrashLogger.checkpoint(this, "stopVpn: vpnInterface.close() выбросил ${e.javaClass.name}")
+        }
         vpnInterface = null
+
         vpnThread?.interrupt()
         vpnThread = null
         executorService?.shutdownNow()
         executorService = null
+
+        // Шаг 2: останавливаем нативный движок (tun2socks/ciadpi) АСИНХРОННО
+        // в отдельном daemon-потоке — pthread_join() внутри может занять
+        // время (например, если ciadpi_thread завис в блокирующем
+        // getaddrinfo() без таймаута), но это больше не влияет на видимое
+        // пользователю состояние VPN (уже отключён на шаге 1) и не рискует
+        // задержать onStartCommand()/вызвать ANR.
+        proxyEngineStopThread = Thread({
+            try {
+                CrashLogger.checkpoint(this, "stopVpn: (async) перед ProxyEngine.stop()")
+                ProxyEngine.stop()
+                CrashLogger.checkpoint(this, "stopVpn: (async) ProxyEngine.stop() вернулся")
+            } catch (e: Exception) {
+                Log.w(TAG, "ProxyEngine stop error", e)
+                CrashLogger.checkpoint(this, "stopVpn: (async) ProxyEngine.stop() выбросил ${e.javaClass.name}")
+            }
+        }, "ProxyEngineStop").apply { isDaemon = true; start() }
+
         stopForeground(true)
         stopSelf()
+        CrashLogger.checkpoint(this, "stopVpn: finished (foreground/self остановлены)")
         Log.i(TAG, "VPN stopped")
     }
 
