@@ -6,8 +6,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.Debug
@@ -197,6 +195,24 @@ class BypassVpnService : VpnService(), Runnable {
     // поток, ни возврат из stopVpn()/onStartCommand(), и не может вызвать
     // ANR, даже если native-потоки зависнут на getaddrinfo() на долгое
     // время.
+    //
+    // v3.7.12 CIS-MAX ПОДТВЕРЖДЕНО: временная диагностика через
+    // ConnectivityManager.getNetworkCapabilities() (сразу после close() и
+    // через 2с) показала на реальном устройстве activeNetwork is VPN:
+    // false в ОБОИХ замерах — то есть система Android перестаёт считать
+    // VPN активным менее чем за ~15мс после нажатия "Остановить VPN".
+    // Значит фикс выше работает корректно, реального бага с "зависшим"
+    // VPN-туннелем нет. Системный экран с длительностью сессии/счётчиками
+    // трафика и кнопкой "Отключиться", который пользователь видит после
+    // остановки — это отдельный СТАНДАРТНЫЙ системный UI Android
+    // (обычно открывается долгим нажатием на значок VPN-ключа в шторке
+    // уведомлений, либо "Настройки -> Сеть -> VPN") — он показывает
+    // снимок состояния на момент открытия и требует ручного
+    // подтверждения независимо от того, остановлен ли VPN программно —
+    // это штатное поведение самой ОС (в частности ColorOS), не связанное
+    // с нашим кодом. Диагностический код (ConnectivityManager-проверки)
+    // удалён после подтверждения — см. TUN2SOCKS_AND_ECH_PLAN.md,
+    // раздел 13.6.
     private fun stopVpn() {
         if (!isRunning) return
         isRunning = false
@@ -216,57 +232,6 @@ class BypassVpnService : VpnService(), Runnable {
             CrashLogger.checkpoint(this, "stopVpn: vpnInterface.close() выбросил ${e.javaClass.name}")
         }
         vpnInterface = null
-
-        // v3.7.12 CIS-MAX: диагностика для отличения двух гипотез после
-        // отчёта пользователя, что системный VPN-индикатор/уведомление
-        // "Connected" (длительность+трафик) продолжает расти ПОСЛЕ нажатия
-        // "Отключиться" в UI. Предыдущий лог (v3.7.11) показал, что ВСЕ
-        // наши Kotlin/JNI-операции (vpnInterface.close(), ProxyEngine.stop())
-        // отрабатывают за ~15-20мс — подозрительно быстро для реальной
-        // проблемы, но BypassVpnService.onDestroy() наступил только через
-        // 76 СЕКУНД после этого. Два конкурирующих объяснения:
-        //   (А) система Android реально продолжает считать VPN-сеть
-        //       активной все эти 76с (утечка ссылки на интерфейс где-то
-        //       вне нашего контроля) — тогда индикатор закономерно не
-        //       гаснет, это реальный баг;
-        //   (Б) VPN-сеть на уровне системы отключилась мгновенно (сразу
-        //       после close()), а сам процесс/сервис был просто "заморожен"
-        //       агрессivным OEM-планировщиком (ColorOS) на эти 76с — тогда
-        //       к видимому пользователем VPN-индикатору это не относится
-        //       вообще, и настоящая причина где-то ещё (например, сам
-        //       системный диалог просто не был закрыт пользователем/ОС
-        //       визуально, хотя сеть уже не активна).
-        // Спрашиваем ConnectivityManager напрямую (это не зависит от
-        // onDestroy()/жизни нашего процесса) сразу после close() и через
-        // небольшую задержку — чтобы в следующем логе точно увидеть,
-        // какая гипотеза верна.
-        try {
-            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-            val activeNet = cm?.activeNetwork
-            val caps = activeNet?.let { cm.getNetworkCapabilities(it) }
-            val activeIsVpn = caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
-            CrashLogger.checkpoint(
-                this,
-                "stopVpn: (диагностика) сразу после close() — activeNetwork is VPN: $activeIsVpn " +
-                        "(activeNetwork=$activeNet)"
-            )
-        } catch (e: Exception) {
-            CrashLogger.checkpoint(this, "stopVpn: (диагностика) ConnectivityManager проверка выбросила ${e.javaClass.name}")
-        }
-        Thread({
-            try {
-                Thread.sleep(2000)
-                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-                val activeNet = cm?.activeNetwork
-                val caps = activeNet?.let { cm.getNetworkCapabilities(it) }
-                val activeIsVpn = caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
-                CrashLogger.checkpoint(
-                    this,
-                    "stopVpn: (диагностика) через 2с после close() — activeNetwork is VPN: $activeIsVpn " +
-                            "(activeNetwork=$activeNet)"
-                )
-            } catch (_: Exception) {}
-        }, "VpnStopDiag").apply { isDaemon = true; start() }
 
         vpnThread?.interrupt()
         vpnThread = null
