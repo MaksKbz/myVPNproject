@@ -1,7 +1,9 @@
 package com.makskbz.myvpnproject.vpn
 
 import android.content.Context
+import android.net.VpnService
 import android.util.Log
+import java.io.File
 
 /**
  * ProxyEngine — Kotlin-мост между BypassVpnService и нативными библиотеками.
@@ -75,8 +77,18 @@ object ProxyEngine {
      * Также передаёт IPv6-адрес netif в tun2socks (раньше IPv6 TCP/UDP
      * из TUN молча дропался lwIP'ом — Chrome Happy-Eyeballs к Cloudflare
      * сайтам вроде meduza.io зависал на мёртвом AAAA-пути).
+     *
+     * v3.8 SUPER-BYPASS: ДО запуска ciadpi поднимаем ProtectSocketServer
+     * (см. ProtectSocketServer.kt) — AF_UNIX сервер, дающий нативному
+     * коду возможность вызвать VpnService.protect(fd) на каждом исходящем
+     * сокете (byedpi/extend.c: socket_mod()/protect(), уже вендорено,
+     * раньше просто не было моста на Kotlin-стороне). Без этого outbound-
+     * сокеты ciadpi сами попадали в TUN — петля TUN→SOCKS→ciadpi→TUN,
+     * из-за которой сайты либо не открывались, либо открывались через
+     * раз, при том что сторонние приложения (ByeDPI) с собственной
+     * protect-связкой работали нормально на том же устройстве.
      */
-    fun start(tunFd: Int, config: BypassConfig): Boolean {
+    fun start(tunFd: Int, config: BypassConfig, vpnService: VpnService): Boolean {
         if (!nativeLibsLoaded) {
             Log.e(TAG, "Native libraries not loaded — cannot start native engine")
             return false
@@ -85,6 +97,24 @@ object ProxyEngine {
         Log.i(TAG, "Starting native engine: preset=${config.presetName} port=${config.socksPort} " +
                 "split=${config.splitPosition} disorder=${config.disorderPosition} " +
                 "oob=${config.oobPosition} fake=${config.fakeEnabled} tlsrec=${config.tlsRec}")
+
+        // v3.8 SUPER-BYPASS: путь берём из filesDir приложения (доступен на
+        // чтение/запись самому процессу, недоступен другим приложениям —
+        // как и рекомендовано для AF_UNIX FILESYSTEM-сокетов на Android).
+        val protectPath = File(vpnService.filesDir, "protect_path").absolutePath
+        val protectServerOk = try {
+            ProtectSocketServer.start(protectPath, vpnService)
+        } catch (e: Exception) {
+            Log.e(TAG, "ProtectSocketServer.start() threw: ${e.message}", e)
+            false
+        }
+        if (!protectServerOk) {
+            // Не фатально — движок всё равно запустится (это поведение
+            // ДО v3.8), но без protect() возможна петля TUN↔SOCKS для
+            // некоторых прошивок. Логируем явно, чтобы это было видно.
+            Log.w(TAG, "ProtectSocketServer failed to start — outbound sockets NOT protected, " +
+                    "may loop back into TUN on some OEM firmwares")
+        }
 
         // Числовая fallback-позиция split (если строка не распарсится в C).
         val splitPosNum = config.splitPosition?.let { Regex("""\d+""").find(it)?.value?.toIntOrNull() }
@@ -105,7 +135,8 @@ object ProxyEngine {
             oobPosStr     = config.oobPosition ?: "",
             tlsRecStr     = config.tlsRec ?: "",
             modHttpStr    = config.modHttp ?: "",
-            udpFakeCount  = config.udpFakeCount ?: 0
+            udpFakeCount  = config.udpFakeCount ?: 0,
+            protectPath   = if (protectServerOk) protectPath else ""
         )
         if (ciadpiResult < 0) {
             Log.e(TAG, "ciadpi failed to start (rc=$ciadpiResult)")
@@ -141,13 +172,14 @@ object ProxyEngine {
     external fun isNativeTun2socksBuilt(): Boolean
 
     /**
-     * Останавливает tun2socks, затем ciadpi.
+     * Останавливает tun2socks, затем ciadpi, затем ProtectSocketServer.
      */
     fun stop() {
         if (!nativeLibsLoaded) return
         Log.i(TAG, "Stopping native engine")
         try { tun2socksStop() } catch (e: Exception) { Log.w(TAG, "tun2socksStop error", e) }
         try { ciadpiStop() } catch (e: Exception) { Log.w(TAG, "ciadpiStop error", e) }
+        try { ProtectSocketServer.stop() } catch (e: Exception) { Log.w(TAG, "ProtectSocketServer stop error", e) }
         Log.i(TAG, "Native engine stopped")
     }
 
@@ -165,7 +197,8 @@ object ProxyEngine {
         oobPosStr:     String,
         tlsRecStr:     String,
         modHttpStr:    String,
-        udpFakeCount:  Int
+        udpFakeCount:  Int,
+        protectPath:   String
     ): Int
 
     private external fun ciadpiStop()

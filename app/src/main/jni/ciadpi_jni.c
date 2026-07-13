@@ -49,6 +49,7 @@ typedef struct {
     int  tlsrec_flag;
     int  udp_fake_count;
     int  mod_http;        /* bit flags from byedpi -M */
+    char protect_path[256]; /* v3.8 SUPER-BYPASS: AF_UNIX path for VpnService.protect() bridge */
 } JniConfig;
 
 static JniConfig g_cfg;
@@ -101,6 +102,33 @@ static void init_params(const JniConfig *cfg) {
     params.baddr.in6.sin6_family = AF_INET6;
     params.baddr.in6.sin6_addr   = in6addr_any;
     params.baddr.in6.sin6_port   = 0;
+
+    // v3.8 SUPER-BYPASS: КРИТИЧЕСКИЙ фикс — outbound-сокеты ciadpi
+    // (remote_sock() в byedpi/proxy.c, вызывается на КАЖДОЕ новое TCP-
+    // соединение к реальному серверу) раньше не были защищены от
+    // попадания обратно в VPN-туннель. addDisallowedApplication(self) на
+    // уровне BypassVpnService.Builder исключает трафик ПРИЛОЖЕНИЯ в
+    // среднем, но на некоторых прошивках (ColorOS/OxygenOS, отчёт
+    // пользователя: "ByeDPI на том же телефоне открывает meduza.io, наш
+    // движок — нет") этого недостаточно для конкретных native fd,
+    // открытых уже после старта VPN — циклическая петля
+    // TUN → tun2socks → SOCKS5 → ciadpi → (новый сокет уходит в TUN) → ...
+    // либо зависает, либо рвётся. params.protect_path задействует уже
+    // вендоренный byedpi/extend.c: socket_mod()/protect() — он подключается
+    // к нашему AF_UNIX серверу (ProtectSocketServer.kt на Kotlin-стороне)
+    // и передаёт fd через SCM_RIGHTS для явного VpnService.protect(fd).
+    if (cfg->protect_path[0]) {
+        params.protect_path = strdup(cfg->protect_path);
+        if (!params.protect_path) {
+            LOGE("OOM: protect_path strdup");
+        } else {
+            LOGI("ciadpi protect_path=%s", params.protect_path);
+            crash_log_checkpoint("ciadpi: protect_path configured");
+        }
+    } else {
+        LOGE("ciadpi: protect_path NOT set — outbound sockets unprotected!");
+        crash_log_checkpoint("ciadpi: WARNING protect_path not set");
+    }
 
     // v3.7.10: mempool required by cache_get()/cache_add() in extend.c.
     if (!params.mempool) {
@@ -219,6 +247,14 @@ static void cleanup_params(void) {
         mem_destroy(params.mempool);
         params.mempool = NULL;
     }
+    // v3.8 SUPER-BYPASS: params.protect_path выделяется через strdup() в
+    // init_params() (const char* в struct params не наш буфер — byedpi
+    // ожидает указатель, живущий всё время работы движка). Освобождаем
+    // при остановке/рестарте, иначе течёт при каждом переключении пресета.
+    if (params.protect_path) {
+        free((void *)params.protect_path);
+        params.protect_path = NULL;
+    }
     free(fake_tls.data);  fake_tls.data  = NULL;
     free(fake_http.data); fake_http.data = NULL;
     free(fake_udp.data);  fake_udp.data  = NULL;
@@ -325,7 +361,8 @@ Java_com_makskbz_myvpnproject_vpn_ProxyEngine_ciadpiStart(
         jstring  oobPosStr,
         jstring  tlsRecStr,
         jstring  modHttpStr,
-        jint     udpFakeCount)
+        jint     udpFakeCount,
+        jstring  protectPath)
 {
     (void)thiz; (void)autoMode;
     if (g_running) { LOGI("ciadpi already running"); return 0; }
@@ -337,6 +374,16 @@ Java_com_makskbz_myvpnproject_vpn_ProxyEngine_ciadpiStart(
     g_cfg.fake_ttl     = (int)fakeTtl;
     g_cfg.drop_sack    = (int)dropSack;
     g_cfg.udp_fake_count = (int)udpFakeCount;
+
+    // v3.8 SUPER-BYPASS: путь к AF_UNIX-серверу ProtectSocketServer.kt.
+    if (protectPath != NULL) {
+        const char *pp = (*env)->GetStringUTFChars(env, protectPath, NULL);
+        if (pp) {
+            strncpy(g_cfg.protect_path, pp, sizeof(g_cfg.protect_path) - 1);
+            g_cfg.protect_path[sizeof(g_cfg.protect_path) - 1] = '\0';
+            (*env)->ReleaseStringUTFChars(env, protectPath, pp);
+        }
+    }
 
     // Prefer rich position strings from Kotlin presets; fall back to numeric splitPos.
     int split_flag = 0;

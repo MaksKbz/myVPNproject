@@ -357,7 +357,7 @@ class BypassVpnService : VpnService(), Runnable {
             CrashLogger.checkpoint(this, "runVpn: tunFd=$tunFd, перед ProxyEngine.start()")
 
             val nativeOk = try {
-                ProxyEngine.start(tunFd, currentConfig)
+                ProxyEngine.start(tunFd, currentConfig, this)
             } catch (e: Exception) {
                 Log.e(TAG, "ProxyEngine start failed", e)
                 CrashLogger.checkpoint(this, "runVpn: ProxyEngine.start() выбросил ${e.javaClass.name}: ${e.message}")
@@ -534,7 +534,7 @@ class BypassVpnService : VpnService(), Runnable {
                         if (tunFd > 0) {
                             Thread.sleep(300)
                             CrashLogger.checkpoint(this, "startAsnAutoDetect: перед ProxyEngine.start() tunFd=$tunFd")
-                            ProxyEngine.start(tunFd, currentConfig)
+                            ProxyEngine.start(tunFd, currentConfig, this)
                             CrashLogger.checkpoint(this, "startAsnAutoDetect: ProxyEngine.start() вернулся")
                         }
                     } catch (e: Throwable) {
@@ -653,7 +653,7 @@ class BypassVpnService : VpnService(), Runnable {
                 val tunFd = vpnInterface?.fd ?: -1
                 if (tunFd > 0) {
                     Thread.sleep(300)
-                    ProxyEngine.start(tunFd, currentConfig)
+                    ProxyEngine.start(tunFd, currentConfig, this)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to restart native engine on preset switch", e)
