@@ -1172,6 +1172,16 @@ int process_device_udp_packet (uint8_t *data, int data_len)
             // construct addresses
             BAddr_InitIPv4(&local_addr, ipv4_header.source_address, udp_header.source_port);
             BAddr_InitIPv4(&remote_addr, ipv4_header.destination_address, udp_header.dest_port);
+
+            // v3.7.14 CIS-MAX: drop QUIC (UDP/443). Chrome prefers HTTP/3 and
+            // will blackhole on blocked QUIC for several seconds before falling
+            // back to TCP/TLS — which is exactly where our DPI desync works.
+            // Without this drop, sites like meduza.io (Cloudflare) often show
+            // "site unavailable" while the VPN itself looks healthy.
+            if (udp_header.dest_port == hton16(443)) {
+                BLog(BLOG_INFO, "UDP/443 QUIC dropped — forcing TCP/TLS fallback");
+                goto fail;
+            }
             
             // if transparent DNS is enabled, any packet arriving at out netif
             // address to port 53 is considered a DNS packet
@@ -1216,6 +1226,13 @@ int process_device_udp_packet (uint8_t *data, int data_len)
             // construct addresses
             BAddr_InitIPv6(&local_addr, ipv6_header.source_address, udp_header.source_port);
             BAddr_InitIPv6(&remote_addr, ipv6_header.destination_address, udp_header.dest_port);
+
+            // v3.7.14: same QUIC drop for IPv6 (Chrome Happy-Eyeballs often
+            // tries AAAA+QUIC first for Cloudflare-hosted sites).
+            if (udp_header.dest_port == hton16(443)) {
+                BLog(BLOG_INFO, "UDP6/443 QUIC dropped — forcing TCP/TLS fallback");
+                goto fail;
+            }
             
             // TODO dns
             is_dns = 0;

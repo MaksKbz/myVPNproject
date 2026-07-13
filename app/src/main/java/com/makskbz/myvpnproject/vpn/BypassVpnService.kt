@@ -300,6 +300,9 @@ class BypassVpnService : VpnService(), Runnable {
                 .addDnsServer("77.88.8.1")
                 .addDnsServer("9.9.9.9")   // Quad9
                 .addDnsServer("94.140.14.14") // AdGuard — работает в РФ
+                // MTU 1400: must match tun2socks BTap MTU (tun2socks_jni.c).
+                // Slightly below typical 1500 so TLS ClientHello + IP/TCP headers
+                // fit without fragmentation that some DPI boxes reassemble.
                 .setMtu(1400)
                 .setBlocking(true)
 

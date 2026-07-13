@@ -1,4 +1,4 @@
-# myVPNproject v3.7 CIS-MAX — Android DPI Bypass
+# myVPNproject v3.7.14 CIS-MAX — Android DPI Bypass
 
 Android-приложение для обхода DPI-блокировок без root и без внешнего сервера.  
 Трафик перехватывается локально через TUN-интерфейс, форвардируется полноценным
@@ -443,6 +443,25 @@ Artifact доступен в разделе [Actions](https://github.com/MaksKbz
       Временный диагностический код (`ConnectivityManager` проверки)
       удалён как выполнивший свою задачу. См. подробности:
       `TUN2SOCKS_AND_ECH_PLAN.md`, разделы 13.5-13.6.
+- [x] **v3.7.14: фикс недоступности заблокированных сайтов (meduza.io и др.)**
+      — четыре связанных бага, из-за которых Chrome показывал «сайт
+      недоступен» при живом VPN:
+      1. **`params.def_ttl = 0`** после `memset` в `ciadpi_jni.c` — режим
+         disorder (дефолтный universal) слал первый фрагмент TLS с TTL=1,
+         затем `restore_state()` выставлял TTL=0 → остаток ClientHello
+         **никогда не уходил в сеть**. Теперь TTL берётся через
+         `getsockopt(IP_TTL)` (как в апстримном byedpi main.c).
+      2. **IPv6 в tun2socks был выключен** (`netif_ip6addr = NULL`) — lwIP
+         дропал все IPv6 TCP/UDP, а Chrome Happy-Eyeballs к Cloudflare
+         (meduza.io = 2606:4700::…) зависал на мёртвом AAAA-пути. Теперь
+         передаётся `fd00:1:fd00:1:fd00:1:fd00:2`.
+      3. **QUIC (UDP/443) не блокировался** — Chrome предпочитал HTTP/3,
+         blackhole на QUIC давал «сайт недоступен» до fallback на TCP.
+         Теперь UDP/443 дропается в `process_device_udp_packet` (IPv4+IPv6).
+      4. **JNI игнорировал oob/tlsrec/modHttp/fake-комбинации пресетов** —
+         «universal» фактически работал как голый disorder@1. Проброшены
+         полные строки позиций (`1+s` → OFFSET_SNI) + усилен дефолтный
+         пресет (disorder+OOB+fake+tlsrec+drop SACK).
 - [ ] Полное E2E-тестирование на реальном устройстве (Алматы / РФ) —
       основной цикл диагностики краша и отключения VPN завершён успешно.
       Тестовая сборка проверена на Linux x86_64
