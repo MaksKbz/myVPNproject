@@ -111,7 +111,8 @@ Java_com_makskbz_myvpnproject_vpn_ProxyEngine_tun2socksStart(
         jint    socksPort,
         jstring tunAddr,
         jstring tunGw,
-        jint    tunPrefix)
+        jint    tunPrefix,
+        jstring tunIp6Addr)
 {
     if (g_running) {
         LOGI("tun2socks already running");
@@ -122,7 +123,10 @@ Java_com_makskbz_myvpnproject_vpn_ProxyEngine_tun2socksStart(
     g_config.tun_fd     = (int)tunFd;
     g_config.socks_port = (int)socksPort;
     g_config.tun_prefix = (int)tunPrefix;
-    g_config.mtu        = 1500;
+    // MTU must match VpnService.Builder.setMtu() (1400) — if BTap MTU is
+    // larger than the real TUN MTU, oversized packets get silently dropped
+    // by the kernel and sites hang mid-handshake.
+    g_config.mtu        = 1400;
 
     const char* addr = (*env)->GetStringUTFChars(env, tunAddr, NULL);
     if (addr) {
@@ -134,6 +138,22 @@ Java_com_makskbz_myvpnproject_vpn_ProxyEngine_tun2socksStart(
         strncpy(g_config.tun_gw, gw, sizeof(g_config.tun_gw) - 1);
         (*env)->ReleaseStringUTFChars(env, tunGw, gw);
     }
+    // v3.7.14: IPv6 netif address — required for lwIP to accept IPv6 TCP/UDP.
+    // Without this, Chrome Happy-Eyeballs to Cloudflare (meduza.io etc.)
+    // prefers AAAA, the SYN never gets a response from tun2socks, and the
+    // page shows "site unavailable" even though IPv4 path would work.
+    if (tunIp6Addr) {
+        const char* ip6 = (*env)->GetStringUTFChars(env, tunIp6Addr, NULL);
+        if (ip6) {
+            strncpy(g_config.tun_ip6addr, ip6, sizeof(g_config.tun_ip6addr) - 1);
+            (*env)->ReleaseStringUTFChars(env, tunIp6Addr, ip6);
+        }
+    }
+    // Fallback if Kotlin forgot to pass it
+    if (g_config.tun_ip6addr[0] == '\0') {
+        strncpy(g_config.tun_ip6addr, "fd00:1:fd00:1:fd00:1:fd00:2",
+                sizeof(g_config.tun_ip6addr) - 1);
+    }
 
     crash_log_checkpoint("tun2socksStart: config prepared, creating thread");
     g_running = 1;
@@ -143,8 +163,8 @@ Java_com_makskbz_myvpnproject_vpn_ProxyEngine_tun2socksStart(
         g_running = 0;
         return -1;
     }
-    LOGI("tun2socks started: tun_fd=%d → SOCKS5 127.0.0.1:%d",
-         g_config.tun_fd, g_config.socks_port);
+    LOGI("tun2socks started: tun_fd=%d → SOCKS5 127.0.0.1:%d ip6=%s mtu=%d",
+         g_config.tun_fd, g_config.socks_port, g_config.tun_ip6addr, g_config.mtu);
     return 0;
 }
 

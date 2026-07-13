@@ -51,14 +51,22 @@ val PRESETS: List<Preset> = listOf(
     Preset(
         id = "universal",
         name = "Универсальный",
-        description = "Рекомендуется по умолчанию. OOB по SNI + Disorder + авто-переключение.",
+        description = "Рекомендуется по умолчанию. Disorder по SNI + OOB + Fake TTL — против ТСПУ/Cloudflare (meduza, youtube).",
         config = BypassConfig(
             presetName = "universal",
-            udpFakeCount = 1,
-            autoMode = "n",
-            oobPosition = "1+s",
+            // v3.7.14: усиленный дефолт. Раньше только disorder@1 без SNI-флага
+            // и без fake — этого часто не хватало против ТСПУ на Cloudflare
+            // (meduza.io и т.п.). Теперь: split/disorder по SNI + OOB + decoy
+            // fake-пакет с низким TTL, чтобы DPI увидел «чистый» ClientHello.
+            splitPosition = "1+s",
             disorderPosition = "1",
-            fakeEnabled = false
+            oobPosition = "1+s",
+            fakeEnabled = true,
+            fakeTtl = 6,
+            dropSack = true,
+            tlsRec = "1+s",
+            udpFakeCount = 1,
+            autoMode = "n"
         )
     ),
     Preset(

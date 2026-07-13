@@ -45,21 +45,6 @@ object ProxyEngine {
     /**
      * v3.7.4 CIS-MAX: устанавливает нативный обработчик крашей (SIGABRT/
      * SIGSEGV/...), пишущий диагностику в файл внутри filesDir приложения.
-     * Нужно вызывать один раз, как можно раньше (из MainActivity.onCreate()
-     * или Application), ДО первого ProxyEngine.start() — иначе краш при
-     * самом первом запуске VPN не будет перехвачен.
-     *
-     * ВАЖНО (найденный баг v3.7.3): crash_handler.c компилируется ОТДЕЛЬНО
-     * в каждую .so-библиотеку (ciadpi_jni.so и tun2socks_jni.so) — это два
-     * независимых набора глобальных переменных, а не общий модуль. Вызов
-     * только со стороны ciadpi_jni.so НЕ покрывал крашей внутри
-     * tun2socks_jni.so (там файл лога никогда не открывался — все
-     * crash_log_checkpoint() в tun2socks_thread молча ничего не писали).
-     * Теперь вызываем установку явно в ОБЕИХ библиотеках.
-     *
-     * Это нужно для отладки на устройствах без доступа к `adb logcat`:
-     * пользователь может открыть приложение после краша и увидеть причину
-     * прямо в UI (см. CrashLogger.kt / HelpTab() в MainActivity.kt).
      */
     fun installCrashHandler(context: Context) {
         if (!nativeLibsLoaded) return
@@ -83,11 +68,13 @@ object ProxyEngine {
      *   1. ciadpi — SOCKS5-прокси с DPI-обходом на порту config.socksPort
      *   2. tun2socks — читает пакеты из TUN fd напрямую и форвардит в SOCKS5
      *
-     * @param tunFd  файловый дескриптор TUN-интерфейса (из VpnService.Builder.establish())
-     * @param config конфигурация пресета
-     * @return true если запуск прошёл без ошибок на уровне JNI-вызовов
-     *         (не гарантирует, что tun2socks реально поднялся — см.
-     *         isNativeForwardingActive() для проверки после небольшой задержки)
+     * v3.7.14: пробрасывает ПОЛНЫЙ набор desync-параметров пресета (oob,
+     * tlsrec, modHttp, udpFake) — раньше JNI игнорировал oob/tlsrec/modHttp,
+     * из-за чего пресет "universal" (OOB по SNI) фактически работал как
+     * простой disorder@1, а youtube/aggressive теряли TLS-record split.
+     * Также передаёт IPv6-адрес netif в tun2socks (раньше IPv6 TCP/UDP
+     * из TUN молча дропался lwIP'ом — Chrome Happy-Eyeballs к Cloudflare
+     * сайтам вроде meduza.io зависал на мёртвом AAAA-пути).
      */
     fun start(tunFd: Int, config: BypassConfig): Boolean {
         if (!nativeLibsLoaded) {
@@ -95,17 +82,30 @@ object ProxyEngine {
             return false
         }
 
-        Log.i(TAG, "Starting native engine: preset=${config.presetName} port=${config.socksPort}")
+        Log.i(TAG, "Starting native engine: preset=${config.presetName} port=${config.socksPort} " +
+                "split=${config.splitPosition} disorder=${config.disorderPosition} " +
+                "oob=${config.oobPosition} fake=${config.fakeEnabled} tlsrec=${config.tlsRec}")
+
+        // Числовая fallback-позиция split (если строка не распарсится в C).
+        val splitPosNum = config.splitPosition?.let { Regex("""\d+""").find(it)?.value?.toIntOrNull() }
+            ?: config.oobPosition?.let { Regex("""\d+""").find(it)?.value?.toIntOrNull() }
+            ?: 1
+        val disorder = if (config.disorderPosition != null) 1 else 0
 
         // Шаг 1: запускаем ciadpi — DPI-обход через SOCKS5
         val ciadpiResult = ciadpiStart(
-            socksPort   = config.socksPort,
-            splitPos    = config.splitPosition?.filter { it.isDigit() }?.toIntOrNull() ?: 1,
-            disorder    = if (config.disorderPosition != null) 1 else 0,
-            fakeEnabled = config.fakeEnabled,
-            fakeTtl     = config.fakeTtl,
-            dropSack    = config.dropSack,
-            autoMode    = config.autoMode ?: ""
+            socksPort     = config.socksPort,
+            splitPos      = splitPosNum,
+            disorder      = disorder,
+            fakeEnabled   = config.fakeEnabled,
+            fakeTtl       = config.fakeTtl,
+            dropSack      = config.dropSack,
+            autoMode      = config.autoMode ?: "",
+            splitPosStr   = config.splitPosition ?: config.disorderPosition ?: "1",
+            oobPosStr     = config.oobPosition ?: "",
+            tlsRecStr     = config.tlsRec ?: "",
+            modHttpStr    = config.modHttp ?: "",
+            udpFakeCount  = config.udpFakeCount ?: 0
         )
         if (ciadpiResult < 0) {
             Log.e(TAG, "ciadpi failed to start (rc=$ciadpiResult)")
@@ -113,16 +113,16 @@ object ProxyEngine {
         }
 
         // Шаг 2: запускаем tun2socks — форвардинг TUN → SOCKS5.
-        // tun2socksStart() сам порождает поток и не блокирует вызывающий —
-        // реальный успех/провал event loop'а внутри badvpn виден только
-        // по логам (LOGCAT tag=tun2socks_jni) или по факту, что реальный
-        // трафик начинает идти (см. isNativeForwardingActive()).
+        // IPv6 netif: должен быть из той же /64, что addAddress() в
+        // BypassVpnService (fd00:1:fd00:1:fd00:1:fd00:1/64) — виртуальный
+        // роутер .2, клиент .1. Без этого lwIP дропает все IPv6-пакеты.
         val tun2socksResult = tun2socksStart(
             tunFd      = tunFd,
             socksPort  = config.socksPort,
             tunAddr    = "10.0.0.2",
             tunGw      = "10.0.0.1",
-            tunPrefix  = 24
+            tunPrefix  = 24,
+            tunIp6Addr = "fd00:1:fd00:1:fd00:1:fd00:2"
         )
         if (tun2socksResult < 0) {
             Log.e(TAG, "tun2socks failed to start (rc=$tun2socksResult)")
@@ -136,13 +136,7 @@ object ProxyEngine {
 
     /**
      * Возвращает true, если приложение собрано с реальным badvpn
-     * (не stub-режим) — т.е. tun2socks действительно форвардит пакеты,
-     * а не крутит пустой цикл. Используется BypassVpnService, чтобы
-     * решить, нужен ли ещё Kotlin packet-loop как fallback.
-     *
-     * ПРИМЕЧАНИЕ: это компайл-тайм признак (BADVPN_AVAILABLE в
-     * CMakeLists.txt), а не runtime-проверка живости event loop —
-     * последнее видно только по логам/трафику.
+     * (не stub-режим) — т.е. tun2socks действительно форвардит пакеты.
      */
     external fun isNativeTun2socksBuilt(): Boolean
 
@@ -160,13 +154,18 @@ object ProxyEngine {
     // ── JNI-объявления: ciadpi ────────────────────────────────────────
 
     private external fun ciadpiStart(
-        socksPort:   Int,
-        splitPos:    Int,
-        disorder:    Int,
-        fakeEnabled: Boolean,
-        fakeTtl:     Int,
-        dropSack:    Boolean,
-        autoMode:    String
+        socksPort:     Int,
+        splitPos:      Int,
+        disorder:      Int,
+        fakeEnabled:   Boolean,
+        fakeTtl:       Int,
+        dropSack:      Boolean,
+        autoMode:      String,
+        splitPosStr:   String,
+        oobPosStr:     String,
+        tlsRecStr:     String,
+        modHttpStr:    String,
+        udpFakeCount:  Int
     ): Int
 
     private external fun ciadpiStop()
@@ -185,9 +184,9 @@ object ProxyEngine {
         socksPort: Int,
         tunAddr:   String,
         tunGw:     String,
-        tunPrefix: Int
+        tunPrefix: Int,
+        tunIp6Addr: String
     ): Int
 
     private external fun tun2socksStop()
 }
-
