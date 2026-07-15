@@ -637,13 +637,48 @@ ssize_t udp_hook(struct eval *val, char *buffer, ssize_t n,
 }
 
 #ifdef __linux__
+/*
+ * v3.7.16 CIS-MAX: КРИТИЧЕСКИЙ фикс — найдена причина "VPN включается, но
+ * реальный интернет не идёт" после добавления protect-моста в v3.7.15.
+ *
+ * ciadpi_thread — ОДНОПОТОЧНЫЙ event loop (start_event_loop() в proxy.c,
+ * classic epoll/poll цикл). remote_sock() (вызывается на КАЖДОЕ новое
+ * исходящее TCP/UDP-соединение к реальному серверу) синхронно вызывает
+ * socket_mod() -> protect(), которая раньше использовала БЛОКИРУЮЩИЙ
+ * connect()+sendmsg()+recv() с таймаутом ПО 1 СЕКУНДЕ НА КАЖДУЮ ФАЗУ.
+ * Пока этот единственный поток блокируется внутри protect(), ВЕСЬ event
+ * loop полностью останавливается — не обрабатываются НИ новые, НИ уже
+ * установленные соединения. Реальный лог с устройства показал сотни
+ * "accepted" записей за несколько секунд (десятки фоновых приложений
+ * телефона подключаются одновременно при первом включении VPN) — при
+ * такой нагрузке кумулятивная задержка от последовательных protect()-
+ * вызовов легко достигает нескольких секунд, за которые ни один байт
+ * реального трафика не проходит: браузер/приложения таймаутятся,
+ * переподключаются, и цикл повторяется (видно по тому, что номера fd в
+ * логе не растут монотонно, а постоянно "прыгают" туда-сюда — признак
+ * массовых close()/reconnect(), а не стабильных долгоживущих соединений).
+ *
+ * AF_UNIX handshake на ЛОКАЛЬНОЙ машине (сам процесс общается со своим же
+ * процессом через loopback Unix-сокет) должен занимать доли миллисекунды
+ * при нормальной работе — секундные таймауты были рассчитаны на "никогда
+ * не должно сработать" случай, а не на типичную задержку. Уменьшены до
+ * 150мс на каждую фазу (connect/send/recv) — это на порядки больше
+ * реально ожидаемого времени (десятки-сотни микросекунд для Binder-вызова
+ * VpnService.protect() + локальный Unix-сокет), но уже не создаёт
+ * заметную кумулятивную задержку event loop даже при сотнях параллельных
+ * соединений.
+ */
+#define PROTECT_TIMEOUT_MS 150
 static int protect(int conn_fd, const char *path) {
     struct sockaddr_un sa;
     sa.sun_family = AF_UNIX;
     strcpy(sa.sun_path, path);
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) { uniperror("socket"); return -1; }
-    struct timeval tv = { .tv_sec = 1 };
+    struct timeval tv = {
+        .tv_sec  = PROTECT_TIMEOUT_MS / 1000,
+        .tv_usec = (PROTECT_TIMEOUT_MS % 1000) * 1000
+    };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     int err = connect(fd, (struct sockaddr *)&sa, sizeof(sa));
@@ -666,6 +701,7 @@ static int protect(int conn_fd, const char *path) {
     return 0;
 }
 #endif
+
 
 void dump_all_cache(void) {
     if (params.mempool) {

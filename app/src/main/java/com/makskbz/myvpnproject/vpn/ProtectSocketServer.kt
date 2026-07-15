@@ -51,7 +51,8 @@ import java.util.concurrent.Executors
  *     оригинальный fd в C-процессе остаётся рабочим — Unix ancillary
  *     передача дублирует дескриптор, а не перемещает его).
  *  4. Отвечаем 1 байтом (успех/неуспех) — C-сторона ждёт этот байт с
- *     таймаутом 1с (см. connect()/recv() в byedpi extend.c: protect()).
+ *     таймаутом 150мс (v3.7.16: снижен с 1с — см. connect()/recv() в
+ *     byedpi extend.c: protect()).
  */
 object ProtectSocketServer {
 
@@ -104,7 +105,16 @@ object ProtectSocketServer {
             val srv = LocalServerSocket(localSocket.fileDescriptor)
             serverSocket = srv
 
-            executor = Executors.newFixedThreadPool(4)
+            // v3.7.16 CIS-MAX: пул увеличен с 4 до 32 потоков. Найдена связанная
+            // причина "VPN не работает" — при первом включении VPN десятки
+            // фоновых приложений одновременно открывают TCP-соединения, каждое
+            // синхронно дожидается protect() из C-потока event loop (см. фикс
+            // таймаута в byedpi/extend.c: protect() выше по коммиту). Даже после
+            // уменьшения таймаута до 150мс, при пуле всего в 4 потока запросы от
+            // C-стороны на JVM-стороне выстраивались бы в очередь у Executor'а —
+            // 32 потока с запасом покрывают всплеск параллельных accept() из
+            // реального лога устройства (сотни соединений за первые секунды).
+            executor = Executors.newFixedThreadPool(32)
             running = true
 
             acceptThread = Thread({
