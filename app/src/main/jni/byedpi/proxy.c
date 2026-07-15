@@ -117,7 +117,30 @@ static int resolve(const char *chost, int len, union sockaddr_u *addr, int type)
     host[len] = 0;
     memcpy(host, chost, len);
     LOG(LOG_S, "resolve: %s\n", host);
-    if (getaddrinfo(host, 0, &hints, &res) || !res) {
+    int rc = getaddrinfo(host, 0, &hints, &res);
+#ifdef ANDROID_APP
+    /* v3.7.17 CIS-MAX: диагностика "куда реально доходит трафик Chrome" —
+     * LOG()/uniperror() пишут только в logcat, к которому у пользователя
+     * нет доступа (тестирует на реальном устройстве без adb). Без этого
+     * невозможно отличить "DNS резолв домена не удался" от "резолв прошёл,
+     * но TCP connect() к серверу не удался/завис" — оба случая выглядят
+     * одинаково снаружи ("сайт не открывается"), но требуют разных фиксов.
+     */
+    {
+        extern void crash_log_checkpoint(const char *tag);
+        char dbgbuf[192];
+        int dbgn;
+        if (rc != 0 || !res) {
+            dbgn = snprintf(dbgbuf, sizeof(dbgbuf),
+                "ciadpi: resolve FAILED host=%.100s rc=%d", host, rc);
+        } else {
+            dbgn = snprintf(dbgbuf, sizeof(dbgbuf),
+                "ciadpi: resolve OK host=%.100s", host);
+        }
+        if (dbgn > 0) crash_log_checkpoint(dbgbuf);
+    }
+#endif
+    if (rc || !res) {
         return -1;
     }
     memcpy(addr, res->ai_addr, SA_SIZE(res->ai_addr));
@@ -309,6 +332,21 @@ static int remote_sock(union sockaddr_u *dst, int type) {
         return -1;
     }
     if (socket_mod(sfd) < 0) {
+#ifdef ANDROID_APP
+        /* v3.7.17 CIS-MAX: КРИТИЧЕСКАЯ диагностика — если socket_mod()
+         * (protect() через AF_UNIX-мост, см. extend.c) не срабатывает,
+         * remote_sock() тихо возвращает -1, и ВООБЩЕ ЛЮБОЕ исходящее
+         * соединение (TCP к реальному серверу) молча проваливается ещё
+         * ДО попытки connect(). Раньше это было видно только в logcat
+         * (uniperror() внутри protect()), недоступном пользователю без
+         * adb — checkpoint-лог показывал только "SOCKS5 client accepted"
+         * (успешный accept ОТ Chrome), создавая ложное впечатление, что
+         * всё работает, хотя каждое соединение тут же обрывалось. */
+        {
+            extern void crash_log_checkpoint(const char *tag);
+            crash_log_checkpoint("ciadpi: socket_mod/protect FAILED — outbound conn dropped");
+        }
+#endif
         close(sfd);
         return -1;
     }
@@ -368,6 +406,32 @@ int create_conn(struct poolhd *pool, struct eval *val,
             sfd, val->fd, ADDR_STR, ntohs(dst->in.sin_port));
     }
     int status = connect(sfd, &addr.sa, SA_SIZE(&addr));
+#ifdef ANDROID_APP
+    /* v3.7.17 CIS-MAX: главная недостающая точка диагностики — реальный
+     * TCP connect() к серверу назначения (meduza.io и т.д.). До этого
+     * checkpoint-лог видел только "SOCKS5 client accepted" (Chrome
+     * подключился к ЛОКАЛЬНОМУ SOCKS5 127.0.0.1), но НИЧЕГО о том, дошёл
+     * ли трафик до реального сервера в интернете — это две совершенно
+     * разные вещи, и без этой строки невозможно отличить "DPI блокирует
+     * desync" от "соединение вообще не уходит с устройства" (например,
+     * из-за ошибки маршрутизации/protect на разных прошивках). */
+    {
+        extern void crash_log_checkpoint(const char *tag);
+        char dbgbuf[160];
+        INIT_ADDR_STR((*dst));
+        int dbgn;
+        if (status == 0 || get_e() == EINPROGRESS || get_e() == EAGAIN) {
+            dbgn = snprintf(dbgbuf, sizeof(dbgbuf),
+                "ciadpi: connect() OK/INPROGRESS sfd=%d dst=%s:%d",
+                sfd, ADDR_STR, ntohs(dst->in.sin_port));
+        } else {
+            dbgn = snprintf(dbgbuf, sizeof(dbgbuf),
+                "ciadpi: connect() FAILED sfd=%d dst=%s:%d errno=%d",
+                sfd, ADDR_STR, ntohs(dst->in.sin_port), get_e());
+        }
+        if (dbgn > 0) crash_log_checkpoint(dbgbuf);
+    }
+#endif
     if (status == 0 && params.tfo) {
         LOG(LOG_S, "TFO supported!\n");
     }
