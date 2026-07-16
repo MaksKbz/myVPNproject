@@ -14,8 +14,8 @@ android {
         applicationId = "com.makskbz.myvpnproject"
         minSdk = 24
         targetSdk = 35
-        versionCode = 36
-        versionName = "3.7.18-cis-max-fix-ipv4-only-operator-ipv6"
+        versionCode = 37
+        versionName = "3.7.19-cis-max-fix-preset-monitor-false-restart"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
 

@@ -410,7 +410,7 @@ class BypassVpnService : VpnService(), Runnable {
             Log.i(TAG, "Native engine started=$nativeOk nativeTun2socks=$nativeTun2socksBuilt " +
                     "preset=$activePresetId fd=$tunFd port=${currentConfig.socksPort}")
 
-            startPresetMonitor()
+            startPresetMonitor(nativeTun2socksBuilt)
             startAsnAutoDetect()
 
             if (nativeTun2socksBuilt) {
@@ -592,7 +592,34 @@ class BypassVpnService : VpnService(), Runnable {
     }
 
     // ===== Auto preset monitor — CIS/RU =====
-    private fun startPresetMonitor() {
+    //
+    // v3.7.19 CIS-MAX: КРИТИЧЕСКИЙ баг, найденный по анализу checkpoint-
+    // лога — в течение одного включения VPN нативный движок (tun2socks+
+    // ciadpi) перезапускался сам по себе каждые ~30-170 секунд, обрывая
+    // ВСЕ уже установленные TCP-соединения Chrome (счётчики "TCP client
+    // #N" каждый раз начинались заново с #1). Причина: `lastPacketTime`
+    // обновляется ТОЛЬКО в runKotlinPacketLoop() (см. ниже) — старом
+    // fallback-цикле, который НЕ используется, когда собран native
+    // tun2socks (`nativeTun2socksBuilt=true`, наш случай — TUN fd
+    // читается напрямую C-кодом, Kotlin вообще не видит пакеты). Значит
+    // `lastPacketTime` навсегда застревал на времени запуска VPN,
+    // `idleMs` монотонно рос, `idleMs > 30000` почти сразу становилось
+    // true — и монитор на КАЖДОЙ итерации (каждые 15с) гонял
+    // testConnectivity(), при паре неудачных попыток (частых — короткий
+    // HTTP-таймаут 2.5с не гарантирует успех даже при рабочем VPN)
+    // вызывал switchToNextPreset(), который делает ProxyEngine.stop() +
+    // ProxyEngine.start() — то есть ПОЛНОСТЬЮ убивает и пересоздаёт
+    // движок, разрывая абсолютно все активные соединения Chrome, даже
+    // если реальный трафик прекрасно шёл. Именно это объясняет, почему
+    // meduza.io мог не успевать полностью загрузиться — TCP-соединения
+    // обрывались раньше, чем завершался TLS handshake + загрузка страницы.
+    //
+    // Фикс: если работает native tun2socks (nativeBuilt=true), НЕ
+    // полагаемся на бесполезную/лживую idleMs-эвристику вообще —
+    // тестируем связность по фиксированному расписанию (раз в ~4 цикла,
+    // 60с), как и раньше для "идла", но без ложного форсирования каждые
+    // 15с.
+    private fun startPresetMonitor(nativeBuilt: Boolean) {
         monitorThread?.interrupt()
         monitorThread = Thread({
             val testUrls = listOf(
@@ -609,9 +636,13 @@ class BypassVpnService : VpnService(), Runnable {
                 try {
                     Thread.sleep(15000)
                     if (!isRunning) break
-                    val idleMs = System.currentTimeMillis() - lastPacketTime
-                    var needTest = idleMs > 30000
-                    if (!needTest && (++idx % 4 == 0)) needTest = true
+                    var needTest = (++idx % 4 == 0)
+                    if (!nativeBuilt) {
+                        // Старая эвристика имеет смысл ТОЛЬКО в fallback-режиме
+                        // (runKotlinPacketLoop() реально обновляет lastPacketTime).
+                        val idleMs = System.currentTimeMillis() - lastPacketTime
+                        if (idleMs > 30000) needTest = true
+                    }
                     if (needTest) {
                         val ok = testConnectivity(testUrls)
                         if (ok) {
