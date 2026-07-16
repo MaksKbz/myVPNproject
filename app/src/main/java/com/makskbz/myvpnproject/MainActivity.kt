@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -25,22 +26,31 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.makskbz.myvpnproject.vpn.BypassVpnService
 import com.makskbz.myvpnproject.vpn.ConfigManager
 import com.makskbz.myvpnproject.vpn.CrashLogger
-import com.makskbz.myvpnproject.vpn.PRESETS
 import com.makskbz.myvpnproject.vpn.ProxyEngine
 
 data class AppItem(val name: String, val packageName: String)
+
+// v3.8 CIS-MAX: пользователи не разбираются в терминах DPI-обхода (split/
+// disorder/OOB/fake TTL) — ручной выбор пресета убран из UI полностью.
+// Система ВСЕГДА стартует с самого лёгкого универсального метода и сама
+// последовательно перебирает более агрессивные варианты при неудачных
+// проверках связности (см. ConfigManager.AUTO_SWITCH_ORDER и
+// BypassVpnService.startPresetMonitor()/switchToNextPreset()). Название
+// каждого метода и что именно он делает описано СПРАВОЧНО во вкладке
+// "Справка", чтобы не перегружать рабочий экран техническими деталями.
+private const val DEFAULT_PRESET_ID = "universal"
 
 class MainActivity : ComponentActivity() {
 
     private val VPN_REQUEST_CODE = 1001
     private val NOTIF_PERMISSION_CODE = 2001
     private var selectedPackages = mutableStateListOf<String>()
-    private var selectedPresetId = mutableStateOf("universal")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -48,9 +58,10 @@ class MainActivity : ComponentActivity() {
         // v3.7.3 CIS-MAX: устанавливаем сборщик крашей (Kotlin + нативный
         // SIGABRT/SIGSEGV/...) КАК МОЖНО РАНЬШЕ — до любых других вызовов,
         // чтобы даже краш при самом первом нажатии "Запустить VPN" был
-        // перехвачен и сохранён на диск. Это позволяет диагностировать
-        // краши на устройствах без доступа к `adb logcat` — пользователь
-        // видит причину прямо в приложении (вкладка "Справка" ниже).
+        // перехвачен и сохранён на диск. v3.8: карточка с логом убрана с
+        // главного экрана (не пугает обычного пользователя техническими
+        // деталями) — теперь доступна только внутри вкладки "Справка" по
+        // явному нажатию "Показать диагностический лог".
         CrashLogger.install(this)
         ProxyEngine.installCrashHandler(this)
         CrashLogger.checkpoint(this, "MainActivity.onCreate() — приложение запущено")
@@ -68,20 +79,16 @@ class MainActivity : ComponentActivity() {
         }
 
         val savedConfig = ConfigManager.loadConfig(this)
-        selectedPresetId.value = savedConfig.presetName
         selectedPackages.addAll(savedConfig.allowedApps)
 
         val installedApps = getInstalledAppsList()
 
         // Читаем логи прошлого краша (если приложение вылетело в предыдущем
-        // запуске) — показываем их пользователю прямо в UI, чтобы не нужен
-        // был adb. Копируем в переменные ДО clearAll(), иначе покажем пустоту.
+        // запуске) — v3.8: больше НЕ показываем автоматически на главном
+        // экране, только передаём во вкладку "Справка" для просмотра по
+        // требованию.
         val javaCrash = CrashLogger.readJavaCrashLog(this)
         val nativeCrash = CrashLogger.readNativeCrashLog(this)
-        // v3.7.5 CIS-MAX: лог Kotlin-контрольных точек — критичен для
-        // диагностики SIGKILL (агрессивные OEM-watchdog'и вроде ColorOS
-        // Autostart Manager), который не перехватывается ни Java, ни C
-        // обработчиками. Последняя записанная точка = последний живой шаг.
         val checkpointsLog = CrashLogger.readCheckpointLog(this)
 
         setContent {
@@ -93,12 +100,10 @@ class MainActivity : ComponentActivity() {
                     MainScreen(
                         installedApps    = installedApps,
                         selectedPackages = selectedPackages,
-                        selectedPresetId = selectedPresetId,
                         onStartVpn       = { requestVpnPermission() },
                         onStopVpn        = { stopVpnService() },
-                        onSaveConfig     = { presetId ->
-                            selectedPresetId.value = presetId
-                            val cfg = ConfigManager.loadPreset(presetId)
+                        onSaveApps       = {
+                            val cfg = ConfigManager.loadPreset(DEFAULT_PRESET_ID)
                                 .copy(allowedApps = selectedPackages.toList())
                             ConfigManager.saveConfig(this, cfg)
                         },
@@ -130,7 +135,8 @@ class MainActivity : ComponentActivity() {
                     val isSystem = (app.flags and ApplicationInfo.FLAG_SYSTEM) != 0
                     val isEssential = listOf(
                         "chrome", "browser", "opera", "firefox",
-                        "discord", "telegram", "youtube", "instagram", "tiktok"
+                        "discord", "telegram", "youtube", "instagram", "tiktok",
+                        "whatsapp"
                     ).any { app.packageName.contains(it) }
                     !isSystem || isEssential
                 }
@@ -167,13 +173,17 @@ class MainActivity : ComponentActivity() {
         CrashLogger.checkpoint(this, "MainActivity.onActivityResult: requestCode=$requestCode resultCode=$resultCode")
         if (requestCode == VPN_REQUEST_CODE && resultCode == RESULT_OK) {
             CrashLogger.checkpoint(this, "MainActivity: VPN-разрешение получено, сохраняем конфиг")
-            val cfg = ConfigManager.loadPreset(selectedPresetId.value)
+            // v3.8 CIS-MAX: пресет больше не выбирается пользователем — всегда
+            // стартуем с "universal" (самый лёгкий, универсальный метод),
+            // дальше BypassVpnService сам переключается на более агрессивные
+            // пресеты при необходимости (см. ConfigManager.AUTO_SWITCH_ORDER).
+            val cfg = ConfigManager.loadPreset(DEFAULT_PRESET_ID)
                 .copy(allowedApps = selectedPackages.toList())
             ConfigManager.saveConfig(this, cfg)
             CrashLogger.checkpoint(this, "MainActivity: вызываем startService(ACTION_START)")
             startService(Intent(this, BypassVpnService::class.java).apply {
                 action = BypassVpnService.ACTION_START
-                putExtra(BypassVpnService.EXTRA_PRESET_ID, selectedPresetId.value)
+                putExtra(BypassVpnService.EXTRA_PRESET_ID, DEFAULT_PRESET_ID)
                 putStringArrayListExtra(
                     BypassVpnService.EXTRA_ALLOWED_APPS,
                     ArrayList(selectedPackages)
@@ -187,17 +197,18 @@ class MainActivity : ComponentActivity() {
 }
 
 // ==============================================================================
-// UI: Jetpack Compose — 3 вкладки: Пресеты / Приложения / Справка
+// UI: Jetpack Compose — v3.8 CIS-MAX
+// 2 вкладки: Приложения / Справка (вкладка "Пресеты" убрана — выбор метода
+// обхода теперь полностью автоматический, см. комментарий у DEFAULT_PRESET_ID)
 // ==============================================================================
 
 @Composable
 fun MainScreen(
     installedApps: List<AppItem>,
     selectedPackages: MutableList<String>,
-    selectedPresetId: MutableState<String>,
     onStartVpn: () -> Unit,
     onStopVpn: () -> Unit,
-    onSaveConfig: (String) -> Unit,
+    onSaveApps: () -> Unit,
     javaCrashLog: String? = null,
     nativeCrashLog: String? = null,
     checkpointsLog: String? = null,
@@ -206,7 +217,6 @@ fun MainScreen(
 ) {
     var isRunning by remember { mutableStateOf(false) }
     var tabIndex  by remember { mutableStateOf(0) }
-    var crashLogsDismissed by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -214,90 +224,24 @@ fun MainScreen(
             .padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        // v3.8 CIS-MAX: переименовано в "VPN_KBZMAX" по требованию.
         Text(
-            text = "myVPNproject",
+            text = "VPN_KBZMAX",
             fontSize = 26.sp,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.primary
         )
-        // v3.7 CIS-MAX: реальный tun2socks (badvpn) + ciadpi (byedpi)
         Text(
-            text = "DPI Bypass v3.7 CIS-MAX \u2022 native tun2socks + ciadpi",
+            text = "Обход блокировок \u2022 автоматический подбор метода",
             fontSize = 12.sp,
             color = Color.Gray,
             modifier = Modifier.padding(bottom = 12.dp)
         )
 
-        // v3.7.3 CIS-MAX: если в прошлом запуске приложение упало (Kotlin
-        // исключение ИЛИ нативный сигнал SIGABRT/SIGSEGV/...), показываем
-        // причину прямо здесь — самое заметное место экрана, чтобы
-        // пользователь мог скопировать текст и прислать разработчику без
-        // необходимости в adb logcat. v3.7.5: если крашлоги пусты (обычно
-        // это означает SIGKILL — сигнал, который вообще не перехватывается
-        // ни Java, ни C кодом), всё равно показываем лог контрольных точек
-        // Kotlin — по последней записанной строке видно последний живой шаг.
-        val hasCrashLog = (!javaCrashLog.isNullOrBlank() || !nativeCrashLog.isNullOrBlank() || !checkpointsLog.isNullOrBlank())
-        if (hasCrashLog && !crashLogsDismissed) {
-            val combined = buildString {
-                if (!javaCrashLog.isNullOrBlank()) append(javaCrashLog).append("\n")
-                if (!nativeCrashLog.isNullOrBlank()) append(nativeCrashLog).append("\n")
-                if (!checkpointsLog.isNullOrBlank()) {
-                    append("=== KOTLIN CHECKPOINTS (последний = последний живой шаг) ===\n")
-                    append(checkpointsLog).append("\n")
-                }
-            }
-
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 12.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFFFFEBEE))
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Text(
-                        "\u26a0\ufe0f Обнаружен лог предыдущего краша",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp,
-                        color = Color(0xFFB71C1C)
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        // v3.7.5: показываем ПОСЛЕДНИЕ 4000 символов, а не
-                        // первые — при накоплении многих чекпоинтов самое
-                        // важное (последний живой шаг перед крахом) всегда
-                        // в конце текста. Кнопка "Копировать" всё равно
-                        // копирует полный текст без обрезки.
-                        combined.takeLast(8000),
-                        fontSize = 10.sp,
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                        color = Color(0xFF4E342E),
-                        modifier = Modifier
-                            .heightIn(max = 220.dp)
-                            .verticalScroll(rememberScrollState())
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Row {
-                        Button(
-                            onClick = { onCopyToClipboard(combined) },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Копировать", fontSize = 12.sp) }
-                        Spacer(Modifier.width(8.dp))
-                        OutlinedButton(
-                            onClick = {
-                                onClearCrashLogs()
-                                crashLogsDismissed = true
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Закрыть", fontSize = 12.sp) }
-                    }
-                }
-            }
-        }
-
         Button(
             onClick = {
                 if (isRunning) { onStopVpn(); isRunning = false }
-                else           { onStartVpn(); isRunning = true  }
+                else           { onSaveApps(); onStartVpn(); isRunning = true }
             },
             modifier = Modifier.fillMaxWidth().height(52.dp),
             colors = ButtonDefaults.buttonColors(
@@ -313,7 +257,7 @@ fun MainScreen(
         }
 
         Text(
-            text = if (isRunning) "\u25cf Активен | Пресет: ${selectedPresetId.value}"
+            text = if (isRunning) "\u25cf Активен \u2014 метод обхода подбирается автоматически"
                    else            "\u25cb Остановлен",
             fontSize = 13.sp,
             color = if (isRunning) Color(0xFF4CAF50) else Color.Gray,
@@ -322,16 +266,13 @@ fun MainScreen(
 
         TabRow(selectedTabIndex = tabIndex) {
             Tab(selected = tabIndex == 0, onClick = { tabIndex = 0 }) {
-                Text("Пресеты", modifier = Modifier.padding(10.dp), fontWeight = FontWeight.Bold)
-            }
-            Tab(selected = tabIndex == 1, onClick = { tabIndex = 1 }) {
                 Text(
                     "Приложения (${selectedPackages.size})",
                     modifier = Modifier.padding(10.dp),
                     fontWeight = FontWeight.Bold
                 )
             }
-            Tab(selected = tabIndex == 2, onClick = { tabIndex = 2 }) {
+            Tab(selected = tabIndex == 1, onClick = { tabIndex = 1 }) {
                 Text("Справка", modifier = Modifier.padding(10.dp), fontWeight = FontWeight.Bold)
             }
         }
@@ -339,69 +280,14 @@ fun MainScreen(
         Spacer(modifier = Modifier.height(12.dp))
 
         when (tabIndex) {
-            0 -> PresetsTab(selectedPresetId, onSaveConfig)
-            1 -> AppsTab(installedApps, selectedPackages)
-            2 -> HelpTab()
-        }
-    }
-}
-
-@Composable
-fun PresetsTab(
-    selectedPresetId: MutableState<String>,
-    onSaveConfig: (String) -> Unit
-) {
-    LazyColumn(modifier = Modifier.fillMaxSize()) {
-        items(PRESETS) { preset ->
-            val isSelected = selectedPresetId.value == preset.id
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp)
-                    .clickable {
-                        selectedPresetId.value = preset.id
-                        onSaveConfig(preset.id)
-                    },
-                colors = CardDefaults.cardColors(
-                    containerColor = if (isSelected)
-                        MaterialTheme.colorScheme.primaryContainer
-                    else
-                        MaterialTheme.colorScheme.surfaceVariant
-                ),
-                elevation = CardDefaults.cardElevation(if (isSelected) 4.dp else 1.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = preset.name,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp,
-                            color = if (isSelected) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.onSurface
-                        )
-                        if (isSelected) {
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                "\u2713",
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    Text(text = preset.description, fontSize = 12.sp, color = Color.Gray)
-                    val cliArgs = ConfigManager.toCliArgs(preset.config).joinToString(" ")
-                    if (cliArgs.isNotBlank()) {
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            text = cliArgs,
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.secondary,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                        )
-                    }
-                }
-            }
+            0 -> AppsTab(installedApps, selectedPackages)
+            1 -> HelpTab(
+                javaCrashLog = javaCrashLog,
+                nativeCrashLog = nativeCrashLog,
+                checkpointsLog = checkpointsLog,
+                onClearCrashLogs = onClearCrashLogs,
+                onCopyToClipboard = onCopyToClipboard
+            )
         }
     }
 }
@@ -411,39 +297,91 @@ fun AppsTab(
     installedApps: List<AppItem>,
     selectedPackages: MutableList<String>
 ) {
-    LazyColumn(modifier = Modifier.fillMaxSize()) {
-        items(installedApps) { app ->
-            val isChecked = selectedPackages.contains(app.packageName)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable {
-                        if (isChecked) selectedPackages.remove(app.packageName)
-                        else           selectedPackages.add(app.packageName)
+    // v3.8 CIS-MAX: строка поиска — список установленных приложений может
+    // быть длинным (десятки-сотни пакетов), пользователю неудобно listать
+    // вручную в поисках нужного приложения, чтобы поставить галочку.
+    var query by remember { mutableStateOf("") }
+    val filteredApps = remember(query, installedApps) {
+        if (query.isBlank()) installedApps
+        else installedApps.filter {
+            it.name.contains(query, ignoreCase = true) ||
+            it.packageName.contains(query, ignoreCase = true)
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 8.dp),
+            placeholder = { Text("Поиск приложения\u2026") },
+            singleLine = true,
+            leadingIcon = { Text("\uD83D\uDD0D", fontSize = 16.sp) },
+            trailingIcon = {
+                if (query.isNotEmpty()) {
+                    IconButton(onClick = { query = "" }) {
+                        Text("\u2715", fontSize = 14.sp)
                     }
-                    .padding(vertical = 8.dp, horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
+                }
+            },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search)
+        )
+
+        if (filteredApps.isEmpty()) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
             ) {
-                Checkbox(
-                    checked = isChecked,
-                    onCheckedChange = { checked ->
-                        if (checked) selectedPackages.add(app.packageName)
-                        else         selectedPackages.remove(app.packageName)
-                    }
+                Text(
+                    "Ничего не найдено",
+                    color = Color.Gray,
+                    fontSize = 13.sp
                 )
-                Spacer(Modifier.width(10.dp))
-                Column {
-                    Text(app.name, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    Text(app.packageName, fontSize = 11.sp, color = Color.Gray)
+            }
+        } else {
+            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                items(filteredApps, key = { it.packageName }) { app ->
+                    val isChecked = selectedPackages.contains(app.packageName)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                if (isChecked) selectedPackages.remove(app.packageName)
+                                else           selectedPackages.add(app.packageName)
+                            }
+                            .padding(vertical = 8.dp, horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = isChecked,
+                            onCheckedChange = { checked ->
+                                if (checked) selectedPackages.add(app.packageName)
+                                else         selectedPackages.remove(app.packageName)
+                            }
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Column {
+                            Text(app.name, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text(app.packageName, fontSize = 11.sp, color = Color.Gray)
+                        }
+                    }
+                    HorizontalDivider()
                 }
             }
-            HorizontalDivider()
         }
     }
 }
 
 @Composable
-fun HelpTab() {
+fun HelpTab(
+    javaCrashLog: String? = null,
+    nativeCrashLog: String? = null,
+    checkpointsLog: String? = null,
+    onClearCrashLogs: () -> Unit = {},
+    onCopyToClipboard: (String) -> Unit = {}
+) {
     val scroll = rememberScrollState()
     Column(
         modifier = Modifier
@@ -465,18 +403,17 @@ fun HelpTab() {
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "1. Выберите пресет на вкладке \u2018Пресеты\u2019.\n" +
-                    "   \u2022 Универсальный \u2014 для большинства случаев,\n" +
-                    "     автоматически определяет оператора по ASN.\n" +
-                    "   \u2022 YouTube \u2014 если YouTube заблокирован.\n" +
-                    "   \u2022 Telegram \u2014 для обхода блокировок Telegram.\n" +
-                    "   \u2022 Минимальный \u2014 экономия батареи.\n" +
-                    "   \u2022 Максимальный \u2014 если остальные не помогли.\n" +
-                    "   \u2022 KZ/МТС/Билайн/Ростелеком \u2014 точный тюнинг\n" +
-                    "     под конкретного оператора СНГ.\n\n" +
-                    "2. На вкладке \u2018Приложения\u2019 отметьте браузеры\n" +
-                    "   и приложения, трафик которых нужно обходить.\n\n" +
-                    "3. Нажмите \u2018ЗАПУСТИТЬ VPN\u2019.\n\n" +
+                    "1. На вкладке \u2018Приложения\u2019 отметьте (или найдите\n" +
+                    "   через поиск) браузеры и приложения, трафик\n" +
+                    "   которых нужно обходить.\n\n" +
+                    "2. Нажмите \u2018ЗАПУСТИТЬ VPN\u2019.\n\n" +
+                    "Метод обхода блокировки подбирается ПОЛНОСТЬЮ\n" +
+                    "АВТОМАТИЧЕСКИ \u2014 вручную ничего выбирать не\n" +
+                    "нужно. Приложение начинает с самого лёгкого\n" +
+                    "универсального метода и, если сайт/сервис всё\n" +
+                    "ещё недоступен, само последовательно пробует\n" +
+                    "более сильные методы (см. список ниже), вплоть\n" +
+                    "до максимально агрессивного.\n\n" +
                     "Как работает:\n" +
                     "Трафик перехватывается локально на устройстве\n" +
                     "(не уходит на внешний сервер). TLS ClientHello\n" +
@@ -493,7 +430,10 @@ fun HelpTab() {
 
         Spacer(Modifier.height(12.dp))
 
-        // Исправление #3: актуальная карточка разработчика без ссылок на удалённые JNI-файлы
+        // v3.8 CIS-MAX: справочное описание методов обхода — раньше
+        // пользователь выбирал их вручную на отдельной вкладке "Пресеты",
+        // теперь выбор автоматический, а описания перенесены сюда просто
+        // для общего понимания (не требуют действий от пользователя).
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
@@ -502,7 +442,50 @@ fun HelpTab() {
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    "Архитектура v3.7 CIS-MAX",
+                    "Методы обхода (справочно, порядок автоперебора)",
+                    fontWeight = FontWeight.Bold, fontSize = 15.sp,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "1. Универсальный \u2014 базовый метод по умолчанию,\n" +
+                    "   подходит для большинства сайтов и сервисов.\n" +
+                    "2. Минимальный \u2014 облегчённая версия, экономит\n" +
+                    "   батарею и CPU.\n" +
+                    "3. Telegram \u2014 усиленный обход для Telegram.\n" +
+                    "4. WhatsApp (РФ) \u2014 обход блокировки WhatsApp,\n" +
+                    "   заблокированного в России с 12.02.2026 через\n" +
+                    "   TSPU/DPI. Работает для текста и медиа через\n" +
+                    "   TCP; голосовые/видеозвонки WhatsApp используют\n" +
+                    "   отдельный протокол, который этот метод не\n" +
+                    "   гарантированно обходит.\n" +
+                    "5. YouTube \u2014 агрессивный набор для YouTube.\n" +
+                    "6\u20139. Тюнинг под конкретных операторов СНГ\n" +
+                    "   (Казахтелеком/Kcell, МТС, Билайн, Ростелеком) \u2014\n" +
+                    "   применяется автоматически, если по IP/ASN\n" +
+                    "   определён именно этот оператор.\n" +
+                    "10. Максимальный (агрессивный) \u2014 все методы\n" +
+                    "    одновременно, самый ресурсоёмкий вариант,\n" +
+                    "    применяется последним, если ничего другое не\n" +
+                    "    сработало.",
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp
+                )
+            }
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        // Карточка: Архитектура
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    "Архитектура v3.8 CIS-MAX",
                     fontWeight = FontWeight.Bold, fontSize = 15.sp,
                     color = MaterialTheme.colorScheme.primary
                 )
@@ -518,8 +501,9 @@ fun HelpTab() {
                     "  \u2022 UDP (QUIC/DNS) через SOCKS5 UDP ASSOCIATE\n" +
                     "  \u2022 Перехват UDP:53 \u2192 резолв через DoH\n" +
                     "  \u2022 Авто-определение оператора по ASN\n" +
-                    "  \u2022 Пресеты СНГ: kz-telecom/mts-ru/beeline-ru/\n" +
-                    "    rostelecom\n\n" +
+                    "  \u2022 Авто-подбор пресета: universal \u2192 minimal \u2192\n" +
+                    "    telegram \u2192 whatsapp-ru \u2192 youtube \u2192 CIS-\n" +
+                    "    операторы \u2192 aggressive\n\n" +
                     "В разработке:\n" +
                     "  \u2022 ECH (Encrypted Client Hello, TLS 1.3)\n" +
                     "Детали: github.com/MaksKbz/myVPNproject",
@@ -528,6 +512,113 @@ fun HelpTab() {
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.secondary
                 )
+            }
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        // v3.8 CIS-MAX: диагностический лог крашей — раньше показывался
+        // автоматически прямо на главном экране (пугал пользователя видом
+        // технических деталей при каждом запуске после сбоя), теперь скрыт
+        // здесь, в справке, и открывается только по явному нажатию.
+        DiagnosticLogCard(
+            javaCrashLog = javaCrashLog,
+            nativeCrashLog = nativeCrashLog,
+            checkpointsLog = checkpointsLog,
+            onClearCrashLogs = onClearCrashLogs,
+            onCopyToClipboard = onCopyToClipboard
+        )
+    }
+}
+
+@Composable
+private fun DiagnosticLogCard(
+    javaCrashLog: String?,
+    nativeCrashLog: String?,
+    checkpointsLog: String?,
+    onClearCrashLogs: () -> Unit,
+    onCopyToClipboard: (String) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    var cleared by remember { mutableStateOf(false) }
+
+    val hasLog = !cleared && (!javaCrashLog.isNullOrBlank() || !nativeCrashLog.isNullOrBlank() || !checkpointsLog.isNullOrBlank())
+    val combined = remember(javaCrashLog, nativeCrashLog, checkpointsLog) {
+        buildString {
+            if (!javaCrashLog.isNullOrBlank()) append(javaCrashLog).append("\n")
+            if (!nativeCrashLog.isNullOrBlank()) append(nativeCrashLog).append("\n")
+            if (!checkpointsLog.isNullOrBlank()) {
+                append("=== KOTLIN CHECKPOINTS (последний = последний живой шаг) ===\n")
+                append(checkpointsLog).append("\n")
+            }
+        }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                "Диагностический лог",
+                fontWeight = FontWeight.Bold, fontSize = 15.sp,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                if (hasLog)
+                    "Обнаружен технический лог (для разработчика, при\n" +
+                    "обращении в поддержку). Обычно эти данные не\n" +
+                    "нужны для повседневного использования."
+                else
+                    "Логов нет \u2014 сбоев с прошлого запуска не\n" +
+                    "обнаружено.",
+                fontSize = 12.sp,
+                color = Color.Gray
+            )
+
+            if (hasLog) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { expanded = !expanded },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (expanded) "Скрыть лог" else "Показать диагностический лог", fontSize = 12.sp)
+                }
+
+                if (expanded) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        // Показываем последние 8000 символов — самое важное
+                        // (последний живой шаг перед крахом) всегда в конце.
+                        // Кнопка "Копировать" копирует полный текст без обрезки.
+                        combined.takeLast(8000),
+                        fontSize = 10.sp,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .heightIn(max = 260.dp)
+                            .verticalScroll(rememberScrollState())
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row {
+                        Button(
+                            onClick = { onCopyToClipboard(combined) },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Копировать", fontSize = 12.sp) }
+                        Spacer(Modifier.width(8.dp))
+                        OutlinedButton(
+                            onClick = {
+                                onClearCrashLogs()
+                                cleared = true
+                                expanded = false
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Очистить", fontSize = 12.sp) }
+                    }
+                }
             }
         }
     }

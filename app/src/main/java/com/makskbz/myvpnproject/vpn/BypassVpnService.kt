@@ -315,7 +315,7 @@ class BypassVpnService : VpnService(), Runnable {
             CrashLogger.checkpoint(this, "runVpn: hasRealIpv6=$hasRealIpv6")
 
             val builder = Builder()
-                .setSession("myVPNproject")
+                .setSession("VPN_KBZMAX")
                 .addAddress("10.0.0.2", 24)
                 .addRoute("0.0.0.0", 0)
                 // DoH-ready DNS, оптимизировано для СНГ/РФ:
@@ -735,7 +735,7 @@ class BypassVpnService : VpnService(), Runnable {
         try {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             val n = NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("myVPNproject активен")
+                .setContentTitle("VPN_KBZMAX активен")
                 .setContentText(text)
                 .setSmallIcon(android.R.drawable.ic_lock_lock)
                 .setOngoing(true)
@@ -777,7 +777,7 @@ class BypassVpnService : VpnService(), Runnable {
             val ch = NotificationChannel(
                 CHANNEL_ID, "VPN сервис",
                 NotificationManager.IMPORTANCE_LOW
-            ).apply { description = "myVPNproject DPI bypass CIS" }
+            ).apply { description = "VPN_KBZMAX DPI bypass CIS" }
             (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
                 .createNotificationChannel(ch)
         }
@@ -785,7 +785,7 @@ class BypassVpnService : VpnService(), Runnable {
 
     private fun buildNotification(): Notification =
         NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("myVPNproject активен")
+            .setContentTitle("VPN_KBZMAX активен")
             .setContentText("DPI bypass • $activePresetId • RU/CIS")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setOngoing(true)

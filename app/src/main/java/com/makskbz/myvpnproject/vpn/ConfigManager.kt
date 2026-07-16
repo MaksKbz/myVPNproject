@@ -109,6 +109,34 @@ val PRESETS: List<Preset> = listOf(
             oobPosition = "1"
         )
     ),
+    // ==========================================================================
+    // v3.8 CIS-MAX — WhatsApp заблокирован в РФ (12 февраля 2026, TSPU/DPI
+    // Роскомнадзора) тем же техническим механизмом, что и Telegram/YouTube:
+    // TSPU распознаёт TLS ClientHello по SNI (whatsapp.net/whatsapp.com/
+    // Meta CDN edge-домены) и либо роняет TCP-соединение (RST/corruption),
+    // либо портит TLS handshake на лету. WhatsApp Voice/Video используют
+    // собственный UDP/STUN-подобный протокол (не QUIC) — TCP-фрагментация
+    // ClientHello (split/disorder/oob) достаточна для текстовых чатов и
+    // медиа через TCP-fallback; для голосовых/видео звонков специального
+    // обхода на уровне этого движка нет (см. справку в UI — ограничение
+    // задокументировано явно, чтобы не создавать ложных ожиданий).
+    // ==========================================================================
+    Preset(
+        id = "whatsapp-ru",
+        name = "WhatsApp (РФ)",
+        description = "Split по SNI + OOB + Disorder + Fake TTL + TLS record split — против TSPU-блокировки WhatsApp в России (с 12.02.2026).",
+        config = BypassConfig(
+            presetName = "whatsapp-ru",
+            splitPosition = "1+s",
+            disorderPosition = "1",
+            oobPosition = "2+s",
+            fakeEnabled = true,
+            fakeTtl = 7,
+            dropSack = true,
+            tlsRec = "1+s",
+            autoMode = "n,r"
+        )
+    ),
     Preset(
         id = "aggressive",
         name = "Максимальный (агрессивный)",
@@ -196,14 +224,20 @@ val PRESETS: List<Preset> = listOf(
 )
 
 /**
- * Порядок для авто-переключения при неудачных проверках соединения.
- * CIS-специфичные пресеты идут после базовых — их предлагаем, если
- * универсальные методы не сработали (или если ASN-детект уже подсказал
- * оператора — тогда его пресет ставится первым, см. BypassVpnService).
+ * v3.8 CIS-MAX: порядок ПОЛНОСТЬЮ АВТОМАТИЧЕСКОГО перебора пресетов —
+ * пользователь больше не выбирает метод обхода вручную (обычные люди не
+ * разбираются в терминах split/disorder/OOB/fake TTL), приложение само
+ * пробует пресеты по возрастанию "агрессивности" (потребление CPU/
+ * батареи и инвазивность модификации трафика), начиная с максимально
+ * лёгкого универсального метода и заканчивая максимально агрессивным
+ * (aggressive — комбинация всех техник одновременно) как последним
+ * резервным вариантом. См. BypassVpnService.startPresetMonitor()/
+ * switchToNextPreset() — при неудачных проверках связности подряд
+ * автоматически переходит к следующему пресету в этом списке.
  */
 val AUTO_SWITCH_ORDER: List<String> = listOf(
-    "universal", "youtube", "telegram", "aggressive", "minimal",
-    "kz-telecom", "mts-ru", "beeline-ru", "rostelecom"
+    "universal", "minimal", "telegram", "whatsapp-ru", "youtube",
+    "kz-telecom", "mts-ru", "beeline-ru", "rostelecom", "aggressive"
 )
 
 // ==============================================================================
