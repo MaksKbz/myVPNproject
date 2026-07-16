@@ -112,7 +112,8 @@ Java_com_makskbz_myvpnproject_vpn_ProxyEngine_tun2socksStart(
         jstring tunAddr,
         jstring tunGw,
         jint    tunPrefix,
-        jstring tunIp6Addr)
+        jstring tunIp6Addr,
+        jboolean ipv6Enabled)
 {
     if (g_running) {
         LOGI("tun2socks already running");
@@ -142,17 +143,33 @@ Java_com_makskbz_myvpnproject_vpn_ProxyEngine_tun2socksStart(
     // Without this, Chrome Happy-Eyeballs to Cloudflare (meduza.io etc.)
     // prefers AAAA, the SYN never gets a response from tun2socks, and the
     // page shows "site unavailable" even though IPv4 path would work.
-    if (tunIp6Addr) {
-        const char* ip6 = (*env)->GetStringUTFChars(env, tunIp6Addr, NULL);
-        if (ip6) {
-            strncpy(g_config.tun_ip6addr, ip6, sizeof(g_config.tun_ip6addr) - 1);
-            (*env)->ReleaseStringUTFChars(env, tunIp6Addr, ip6);
+    //
+    // v3.7.18 CIS-MAX: КРИТИЧЕСКОЕ уточнение — диагностика (v3.7.17)
+    // показала, что на реальном устройстве ВСЕ connect() к реальным сайтам
+    // шли по IPv6 и проваливались с errno=101 (ENETUNREACH) — оператор
+    // IPv4-only, реального IPv6-маршрута нет. Если Kotlin-сторона явно
+    // передаёт ipv6Enabled=false (Ipv6Connectivity.hasRealIpv6() вернул
+    // false), НЕ устанавливаем IPv6 netif вообще — тогда lwIP не будет
+    // отвечать на IPv6-пакеты из TUN, и Chrome/Android быстро откатятся на
+    // IPv4 вместо того чтобы ждать мёртвый IPv6-путь.
+    if (ipv6Enabled) {
+        if (tunIp6Addr) {
+            const char* ip6 = (*env)->GetStringUTFChars(env, tunIp6Addr, NULL);
+            if (ip6) {
+                strncpy(g_config.tun_ip6addr, ip6, sizeof(g_config.tun_ip6addr) - 1);
+                (*env)->ReleaseStringUTFChars(env, tunIp6Addr, ip6);
+            }
         }
-    }
-    // Fallback if Kotlin forgot to pass it
-    if (g_config.tun_ip6addr[0] == '\0') {
-        strncpy(g_config.tun_ip6addr, "fd00:1:fd00:1:fd00:1:fd00:2",
-                sizeof(g_config.tun_ip6addr) - 1);
+        // Fallback if Kotlin forgot to pass it (but did request ipv6Enabled).
+        if (g_config.tun_ip6addr[0] == '\0') {
+            strncpy(g_config.tun_ip6addr, "fd00:1:fd00:1:fd00:1:fd00:2",
+                    sizeof(g_config.tun_ip6addr) - 1);
+        }
+        LOGI("tun2socks: IPv6 netif ENABLED (%s)", g_config.tun_ip6addr);
+    } else {
+        g_config.tun_ip6addr[0] = '\0';
+        LOGI("tun2socks: IPv6 netif DISABLED (no real IPv6 connectivity detected)");
+        crash_log_checkpoint("tun2socks: IPv6 DISABLED — no real IPv6 connectivity");
     }
 
     crash_log_checkpoint("tun2socksStart: config prepared, creating thread");

@@ -88,7 +88,7 @@ object ProxyEngine {
      * раз, при том что сторонние приложения (ByeDPI) с собственной
      * protect-связкой работали нормально на том же устройстве.
      */
-    fun start(tunFd: Int, config: BypassConfig, vpnService: VpnService): Boolean {
+    fun start(tunFd: Int, config: BypassConfig, vpnService: VpnService, ipv6Enabled: Boolean = true): Boolean {
         if (!nativeLibsLoaded) {
             Log.e(TAG, "Native libraries not loaded — cannot start native engine")
             return false
@@ -136,7 +136,8 @@ object ProxyEngine {
             tlsRecStr     = config.tlsRec ?: "",
             modHttpStr    = config.modHttp ?: "",
             udpFakeCount  = config.udpFakeCount ?: 0,
-            protectPath   = if (protectServerOk) protectPath else ""
+            protectPath   = if (protectServerOk) protectPath else "",
+            ipv6Enabled   = ipv6Enabled
         )
         if (ciadpiResult < 0) {
             Log.e(TAG, "ciadpi failed to start (rc=$ciadpiResult)")
@@ -147,13 +148,21 @@ object ProxyEngine {
         // IPv6 netif: должен быть из той же /64, что addAddress() в
         // BypassVpnService (fd00:1:fd00:1:fd00:1:fd00:1/64) — виртуальный
         // роутер .2, клиент .1. Без этого lwIP дропает все IPv6-пакеты.
+        //
+        // v3.7.18 CIS-MAX: ipv6Enabled приходит от Ipv6Connectivity.hasRealIpv6()
+        // (проверено ДО establish(), пока обычная сеть ещё доступна). Если
+        // false — реального IPv6-маршрута у оператора нет (диагностика
+        // v3.7.17 показала errno=101 ENETUNREACH на ВСЕХ connect() к
+        // реальным сайтам по IPv6) — не сообщаем tun2socks IPv6-адрес
+        // вообще, чтобы Chrome не тратил время на заведомо мёртвый путь.
         val tun2socksResult = tun2socksStart(
             tunFd      = tunFd,
             socksPort  = config.socksPort,
             tunAddr    = "10.0.0.2",
             tunGw      = "10.0.0.1",
             tunPrefix  = 24,
-            tunIp6Addr = "fd00:1:fd00:1:fd00:1:fd00:2"
+            tunIp6Addr = "fd00:1:fd00:1:fd00:1:fd00:2",
+            ipv6Enabled = ipv6Enabled
         )
         if (tun2socksResult < 0) {
             Log.e(TAG, "tun2socks failed to start (rc=$tun2socksResult)")
@@ -198,7 +207,8 @@ object ProxyEngine {
         tlsRecStr:     String,
         modHttpStr:    String,
         udpFakeCount:  Int,
-        protectPath:   String
+        protectPath:   String,
+        ipv6Enabled:   Boolean
     ): Int
 
     private external fun ciadpiStop()
@@ -218,7 +228,8 @@ object ProxyEngine {
         tunAddr:   String,
         tunGw:     String,
         tunPrefix: Int,
-        tunIp6Addr: String
+        tunIp6Addr: String,
+        ipv6Enabled: Boolean
     ): Int
 
     private external fun tun2socksStop()

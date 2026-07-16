@@ -52,6 +52,12 @@ class BypassVpnService : VpnService(), Runnable {
     @Volatile private var isRunning = false
     @Volatile private var activePresetId: String = "universal"
     @Volatile private var currentConfig: BypassConfig = ConfigManager.loadPreset("universal")
+    // v3.7.18 CIS-MAX: определяется ОДИН раз в начале runVpn() (пока
+    // обычная сеть ещё доступна, до establish()) и используется во ВСЕХ
+    // местах перезапуска native-движка в рамках этой же VPN-сессии
+    // (авто-переключение пресета, ASN auto-detect рестарт) — реальная
+    // IPv6-связность сети не меняется в течение одной сессии VPN.
+    @Volatile private var hasRealIpv6: Boolean = false
 
     // Статистика для авто-переключения
     @Volatile private var lastPacketTime = System.currentTimeMillis()
@@ -285,12 +291,33 @@ class BypassVpnService : VpnService(), Runnable {
     private fun runVpn(allowedApps: ArrayList<String>?) {
         try {
             CrashLogger.checkpoint(this, "runVpn: начало, allowedApps=${allowedApps?.size ?: 0}")
+
+            // v3.7.18 CIS-MAX: КРИТИЧЕСКАЯ находка из checkpoint-лога — ВСЕ
+            // без исключения connect() к реальным сайтам (порт 443) шли по
+            // IPv6 и проваливались с errno=101 (ENETUNREACH), при этом
+            // единственные успешные исходящие соединения (DNS-over-TLS,
+            // порт 853) шли по IPv4. ENETUNREACH на connect() означает, что
+            // у реальной сети устройства попросту НЕТ IPv6-маршрута (частая
+            // ситуация у мобильных операторов СНГ/РФ — IPv4-only APN).
+            // Наш собственный VPN-туннель вешает на TUN приватный IPv6-адрес
+            // (addAddress ниже) — это заставляет Android/Chrome (Happy
+            // Eyeballs) считать, что IPv6-путь работает, и предпочитать его,
+            // хотя за TUN'ом реального IPv6 нет. Проверяем РЕАЛЬНУЮ IPv6-
+            // связность (в обход VPN, пока обычная сеть ещё активна) и, если
+            // её нет, полностью отключаем IPv6 в TUN — тогда Chrome сразу
+            // пойдёт по IPv4, который реально работает.
+            hasRealIpv6 = try {
+                Ipv6Connectivity.hasRealIpv6()
+            } catch (e: Exception) {
+                Log.w(TAG, "IPv6 connectivity check failed: ${e.message}")
+                false
+            }
+            CrashLogger.checkpoint(this, "runVpn: hasRealIpv6=$hasRealIpv6")
+
             val builder = Builder()
                 .setSession("myVPNproject")
                 .addAddress("10.0.0.2", 24)
-                .addAddress("fd00:1:fd00:1:fd00:1:fd00:1", 64)
                 .addRoute("0.0.0.0", 0)
-                .addRoute("::", 0)
                 // DoH-ready DNS, оптимизировано для СНГ/РФ:
                 .addDnsServer("1.1.1.1")   // Cloudflare
                 .addDnsServer("1.0.0.1")
@@ -305,6 +332,15 @@ class BypassVpnService : VpnService(), Runnable {
                 // fit without fragmentation that some DPI boxes reassemble.
                 .setMtu(1400)
                 .setBlocking(true)
+
+            // v3.7.18: IPv6-адрес/маршрут добавляем в TUN ТОЛЬКО если у
+            // устройства есть реальная IPv6-связность — иначе Chrome видит
+            // "рабочий" IPv6 внутри VPN и тратит секунды на заведомо мёртвые
+            // попытки (Happy Eyeballs) прежде чем откатиться на IPv4.
+            if (hasRealIpv6) {
+                builder.addAddress("fd00:1:fd00:1:fd00:1:fd00:1", 64)
+                builder.addRoute("::", 0)
+            }
 
             // v3.7 CIS-MAX: исправлен баг self-exclusion в split-tunnel режиме.
             // Android VpnService.Builder может иметь ЛИБО allowed-список,
@@ -357,7 +393,7 @@ class BypassVpnService : VpnService(), Runnable {
             CrashLogger.checkpoint(this, "runVpn: tunFd=$tunFd, перед ProxyEngine.start()")
 
             val nativeOk = try {
-                ProxyEngine.start(tunFd, currentConfig, this)
+                ProxyEngine.start(tunFd, currentConfig, this, hasRealIpv6)
             } catch (e: Exception) {
                 Log.e(TAG, "ProxyEngine start failed", e)
                 CrashLogger.checkpoint(this, "runVpn: ProxyEngine.start() выбросил ${e.javaClass.name}: ${e.message}")
@@ -534,7 +570,7 @@ class BypassVpnService : VpnService(), Runnable {
                         if (tunFd > 0) {
                             Thread.sleep(300)
                             CrashLogger.checkpoint(this, "startAsnAutoDetect: перед ProxyEngine.start() tunFd=$tunFd")
-                            ProxyEngine.start(tunFd, currentConfig, this)
+                            ProxyEngine.start(tunFd, currentConfig, this, hasRealIpv6)
                             CrashLogger.checkpoint(this, "startAsnAutoDetect: ProxyEngine.start() вернулся")
                         }
                     } catch (e: Throwable) {
@@ -653,7 +689,7 @@ class BypassVpnService : VpnService(), Runnable {
                 val tunFd = vpnInterface?.fd ?: -1
                 if (tunFd > 0) {
                     Thread.sleep(300)
-                    ProxyEngine.start(tunFd, currentConfig, this)
+                    ProxyEngine.start(tunFd, currentConfig, this, hasRealIpv6)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to restart native engine on preset switch", e)

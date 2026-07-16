@@ -50,6 +50,7 @@ typedef struct {
     int  udp_fake_count;
     int  mod_http;        /* bit flags from byedpi -M */
     char protect_path[256]; /* v3.8 SUPER-BYPASS: AF_UNIX path for VpnService.protect() bridge */
+    int  ipv6_enabled;    /* v3.7.18: 0 если у устройства нет реальной IPv6-связности */
 } JniConfig;
 
 static JniConfig g_cfg;
@@ -79,7 +80,19 @@ static void init_params(const JniConfig *cfg) {
     params.mode      = MODE_SOCKS5;
     params.resolve   = true;
     // v3.7.1: IPv6 destinations через dual-stack baddr (см. ниже).
-    params.ipv6      = true;
+    //
+    // v3.7.18 CIS-MAX: КРИТИЧЕСКОЕ уточнение — checkpoint-диагностика
+    // (v3.7.17) показала, что на реальном устройстве ВСЕ без исключения
+    // connect() к реальным сайтам шли по IPv6 и проваливались с
+    // errno=101 (ENETUNREACH) — у оператора попросту нет IPv6-маршрута.
+    // Если Kotlin-сторона обнаружила (Ipv6Connectivity.hasRealIpv6(),
+    // вызывается ДО establish() пока обычная сеть ещё доступна), что
+    // реального IPv6 нет — отключаем params.ipv6 здесь тоже: даже если
+    // какой-то IPv6-запрос всё же дойдёт до SOCKS5 (например, через
+    // A/AAAA резолв самого ciadpi при params.resolve=true), resolve()
+    // не будет выбирать AF_UNSPEC (пробовать IPv6 первым), а сразу
+    // работать по AF_INET — быстрее и без обречённых попыток.
+    params.ipv6      = cfg->ipv6_enabled != 0;
     // SOCKS5 UDP ASSOCIATE — QUIC/DNS-over-UDP из tun2socks.
     params.udp       = true;
     params.max_open  = 512;
@@ -362,7 +375,8 @@ Java_com_makskbz_myvpnproject_vpn_ProxyEngine_ciadpiStart(
         jstring  tlsRecStr,
         jstring  modHttpStr,
         jint     udpFakeCount,
-        jstring  protectPath)
+        jstring  protectPath,
+        jboolean ipv6Enabled)
 {
     (void)thiz; (void)autoMode;
     if (g_running) { LOGI("ciadpi already running"); return 0; }
@@ -374,6 +388,7 @@ Java_com_makskbz_myvpnproject_vpn_ProxyEngine_ciadpiStart(
     g_cfg.fake_ttl     = (int)fakeTtl;
     g_cfg.drop_sack    = (int)dropSack;
     g_cfg.udp_fake_count = (int)udpFakeCount;
+    g_cfg.ipv6_enabled = (int)ipv6Enabled;
 
     // v3.8 SUPER-BYPASS: путь к AF_UNIX-серверу ProtectSocketServer.kt.
     if (protectPath != NULL) {
