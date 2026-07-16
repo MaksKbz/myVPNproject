@@ -388,7 +388,12 @@ fun HelpTab(
             .fillMaxSize()
             .verticalScroll(scroll)
     ) {
-        // Карточка 1: Инструкция для пользователя
+        // v3.8.1 CIS-MAX: справка оставлена ТОЛЬКО с практической
+        // пользовательской информацией — как пользоваться приложением.
+        // Технические детали (какие методы обхода используются, как
+        // устроен движок изнутри, ссылка на репозиторий разработки)
+        // убраны по требованию — эта информация не помогает обычному
+        // пользователю и только загромождает экран.
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
@@ -407,110 +412,12 @@ fun HelpTab(
                     "   через поиск) браузеры и приложения, трафик\n" +
                     "   которых нужно обходить.\n\n" +
                     "2. Нажмите \u2018ЗАПУСТИТЬ VPN\u2019.\n\n" +
-                    "Метод обхода блокировки подбирается ПОЛНОСТЬЮ\n" +
-                    "АВТОМАТИЧЕСКИ \u2014 вручную ничего выбирать не\n" +
-                    "нужно. Приложение начинает с самого лёгкого\n" +
-                    "универсального метода и, если сайт/сервис всё\n" +
-                    "ещё недоступен, само последовательно пробует\n" +
-                    "более сильные методы (см. список ниже), вплоть\n" +
-                    "до максимально агрессивного.\n\n" +
-                    "Как работает:\n" +
-                    "Трафик перехватывается локально на устройстве\n" +
-                    "(не уходит на внешний сервер). TLS ClientHello\n" +
-                    "разбивается на фрагменты (IPv4 и IPv6) \u2014 DPI\n" +
-                    "провайдера не распознаёт сигнатуру блокируемого\n" +
-                    "ресурса. Обычный DNS (UDP:53) перехватывается и\n" +
-                    "резолвится через DoH \u2014 провайдер не видит,\n" +
-                    "какие домены вы посещаете.",
+                    "Больше ничего настраивать не нужно \u2014 приложение\n" +
+                    "само подбирает подходящий способ обхода блокировки\n" +
+                    "и переключается на более сильный, если сайт или\n" +
+                    "сервис остаётся недоступен.",
                     fontSize = 13.sp,
                     lineHeight = 19.sp
-                )
-            }
-        }
-
-        Spacer(Modifier.height(12.dp))
-
-        // v3.8 CIS-MAX: справочное описание методов обхода — раньше
-        // пользователь выбирал их вручную на отдельной вкладке "Пресеты",
-        // теперь выбор автоматический, а описания перенесены сюда просто
-        // для общего понимания (не требуют действий от пользователя).
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant
-            )
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    "Методы обхода (справочно, порядок автоперебора)",
-                    fontWeight = FontWeight.Bold, fontSize = 15.sp,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "1. Универсальный \u2014 базовый метод по умолчанию,\n" +
-                    "   подходит для большинства сайтов и сервисов.\n" +
-                    "2. Минимальный \u2014 облегчённая версия, экономит\n" +
-                    "   батарею и CPU.\n" +
-                    "3. Telegram \u2014 усиленный обход для Telegram.\n" +
-                    "4. WhatsApp (РФ) \u2014 обход блокировки WhatsApp,\n" +
-                    "   заблокированного в России с 12.02.2026 через\n" +
-                    "   TSPU/DPI. Работает для текста и медиа через\n" +
-                    "   TCP; голосовые/видеозвонки WhatsApp используют\n" +
-                    "   отдельный протокол, который этот метод не\n" +
-                    "   гарантированно обходит.\n" +
-                    "5. YouTube \u2014 агрессивный набор для YouTube.\n" +
-                    "6\u20139. Тюнинг под конкретных операторов СНГ\n" +
-                    "   (Казахтелеком/Kcell, МТС, Билайн, Ростелеком) \u2014\n" +
-                    "   применяется автоматически, если по IP/ASN\n" +
-                    "   определён именно этот оператор.\n" +
-                    "10. Максимальный (агрессивный) \u2014 все методы\n" +
-                    "    одновременно, самый ресурсоёмкий вариант,\n" +
-                    "    применяется последним, если ничего другое не\n" +
-                    "    сработало.",
-                    fontSize = 12.sp,
-                    lineHeight = 18.sp
-                )
-            }
-        }
-
-        Spacer(Modifier.height(12.dp))
-
-        // Карточка: Архитектура
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant
-            )
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    "Архитектура v3.8 CIS-MAX",
-                    fontWeight = FontWeight.Bold, fontSize = 15.sp,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "TUN \u2192 tun2socks (badvpn, native)\n" +
-                    "    \u2192 SOCKS5 127.0.0.1:1080\n" +
-                    "    \u2192 ciadpi (byedpi, native, TCP split/fake)\n" +
-                    "    \u2192 интернет\n\n" +
-                    "Движок:\n" +
-                    "  \u2022 Полноценный TCP/IP стек (lwIP) \u2014 не только\n" +
-                    "    фрагментация TLS ClientHello, а весь TCP\n" +
-                    "  \u2022 UDP (QUIC/DNS) через SOCKS5 UDP ASSOCIATE\n" +
-                    "  \u2022 Перехват UDP:53 \u2192 резолв через DoH\n" +
-                    "  \u2022 Авто-определение оператора по ASN\n" +
-                    "  \u2022 Авто-подбор пресета: universal \u2192 minimal \u2192\n" +
-                    "    telegram \u2192 whatsapp-ru \u2192 youtube \u2192 CIS-\n" +
-                    "    операторы \u2192 aggressive\n\n" +
-                    "В разработке:\n" +
-                    "  \u2022 ECH (Encrypted Client Hello, TLS 1.3)\n" +
-                    "Детали: github.com/MaksKbz/myVPNproject",
-                    fontSize = 12.sp,
-                    lineHeight = 18.sp,
-                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.secondary
                 )
             }
         }
@@ -526,6 +433,7 @@ fun HelpTab(
             nativeCrashLog = nativeCrashLog,
             checkpointsLog = checkpointsLog,
             onClearCrashLogs = onClearCrashLogs,
+
             onCopyToClipboard = onCopyToClipboard
         )
     }

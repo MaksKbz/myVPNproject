@@ -14,8 +14,8 @@ android {
         applicationId = "com.makskbz.myvpnproject"
         minSdk = 24
         targetSdk = 35
-        versionCode = 38
-        versionName = "3.8.0-vpn-kbzmax-auto-preset-ui"
+        versionCode = 39
+        versionName = "3.8.1-vpn-kbzmax-clean-help-tab"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
 
